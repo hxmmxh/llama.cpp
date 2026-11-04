@@ -7,6 +7,7 @@
 #include "ggml.h"
 #include "unary-ops.h"
 #include "vec.h"
+#include "q8-pv.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -9068,6 +9069,11 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
                 }
 
                 // V += v*expf(s - M)
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(__ARM_FEATURE_SVE)
+                if (!params->use_ref && v->type == GGML_TYPE_Q8_0) {
+                    ggml_vec_mad_q8_0_f32(DV, VKQ32, (const block_q8_0 *) v_data, vs);
+                } else
+#endif
                 if (v_to_float) {
                     v_to_float(v_data, V32, DV);
                     ggml_vec_mad_f32(DV, VKQ32, V32, vs);

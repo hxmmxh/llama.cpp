@@ -12709,6 +12709,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // Q8 V: mixed K types, short rows, prefill, and token-interleaved cache views.
+    for (int64_t dv : {32, 96, 256, 320}) {
+        for (ggml_type type_k : {GGML_TYPE_F16, GGML_TYPE_Q8_0}) {
+            for (int64_t nq : {1, 4}) {
+                test_cases.emplace_back(new test_flash_attn_ext(256, dv, 4, {4, 1}, 513, nq, true, false, 0, 0,
+                    GGML_PREC_F32, type_k, GGML_TYPE_Q8_0, {0, 2, 1, 3}));
+            }
+        }
+    }
+    test_cases.emplace_back(new test_flash_attn_ext_large_logits(256, 256, 4, {4, 1}, 513, 4, true, true, 8.0f, 30.0f,
+        GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+
     // GQA4 decode: split-KV boundary, uneven chunks, and both cache layouts.
     for (int64_t kv : {511, 512, 513, 768, 2048}) {
         for (bool mask : {false, true}) {
