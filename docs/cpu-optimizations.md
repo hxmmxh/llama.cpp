@@ -88,3 +88,48 @@ The backend regression set can be reproduced with:
 ```
 
 Build settings, source and library hashes, exact-output dumps and raw timing records are retained in `cpu_infer/experiments/cpu-opt-geglu-20261104-115621/`. Windows has not been remeasured for this port.
+
+**ARM NEON Q8_K activation quantization**
+
+This change ports `cpu_infer/op_optimizer/q8_k_quantize/patches/q8-k-neon.patch`, originally based on `a34de8618b25dfc32ee43749db47d767a9f0a25d`. Its control is `86529d2aef498ae8f2c8c91a362bdd700582dbaa`, containing GQA4 and GEGLU.
+
+The AArch64 NEON implementation of `quantize_row_q8_K()` uses vector absolute maxima, magic-add rounding, integer packing and 16-element sums. A scalar scan retains the sign of the first absolute maximum, matching the reference tie rule. Zero blocks preserve the reference behavior, including leaving their block sums untouched. The input length remains a multiple of `QK_K`.
+
+The fast path requires both `__aarch64__` and `__ARM_NEON`. Other ARM builds retain the reference call; other architecture implementations are unchanged. This accelerates runtime activation preparation for quantized matrix multiplication. It does not change model weights or KV cache formats, and does not accelerate x86 CPUs.
+
+The existing `test-quantize-fns` suite now includes 320 AArch64 NEON exact-byte comparisons across four row lengths and two input alignments. Patterns cover signed zeros, mixed zero/nonzero blocks, opposite-sign tied maxima at different SIMD positions, half-integer rounding boundaries and random inputs near magnitudes `1e-20` and `1e20`.
+
+Validation artifacts are retained in `cpu_infer/experiments/cpu-opt-q8-k-neon-20261104-135229/`. Model and operator timing use the same ordinary Release/native CPU configuration as above. Supplementary quantization checks use `-ffast-math -fno-finite-math-only` in both control and candidate GGML libraries; the latter flag is required by the existing backend's non-finite arithmetic checks. This supplementary configuration is not used for model timing. Windows has not been remeasured for this port.
+
+- The complete `test-quantize-fns -v` suite passes in both variants under both configurations, including all 320 new exact-byte checks.
+- The historical standalone 160-case exact-quantization harness also passes in all four builds.
+- Selected Q2_K through Q6_K matrix multiplication regressions pass 60/60 in both ordinary Release builds.
+- Spark-X2.6-4B Q4_K_M model checks at 2K and 8K history compare 16 decode steps per depth. All 4,194,304 logits are finite and bitwise identical to the GQA4 + GEGLU control.
+
+The single-thread microbenchmark calls the CPU backend's Q8_K `from_float` directly. It uses ABBA process order, 20 warmup calls, calibration to at least 50 ms per batch and five timed batches per shape. It excludes allocation, initialization, graph launch and synchronization. All four output dumps are byte-identical.
+
+| Elements | Control (us) | NEON (us) | Speedup |
+| --- | ---: | ---: | ---: |
+| 256 | 0.260 | 0.075 | 3.47x |
+| 2560 | 2.592 | 0.954 | 2.72x |
+| 4096 | 4.152 | 1.535 | 2.71x |
+| 10240 | 10.397 | 3.498 | 2.97x |
+
+All process latency drifts are within 1.20%. These are activation quantization timings, not complete matrix multiplication or model throughput.
+
+Whole-model ABBA timing uses 8 threads, F16/F16 KV, flash attention, compact SWA, context 8448, batch 256 and microbatch 128. Each process restores a control-generated state, warms up for 128 tokens and records three 128-token samples. Timing includes decode only, excluding loading, prefill, state restore and sampling.
+
+| History | GQA4 + GEGLU control (tokens/s) | With NEON Q8_K (tokens/s) | Observed change | Control / candidate throughput drift |
+| --- | ---: | ---: | ---: | ---: |
+| 2048 | 47.91 | 54.29 | +13.32% | -13.74% / +2.51% |
+| 8192 | 43.65 | 44.77 | +2.56% | -0.57% / +1.07% |
+
+At both depths, both candidate process averages exceed both control process averages. The 8K result provides a positive local whole-model measurement with modest process drift. At 2K, control drift is comparable to the aggregate observed gain, so this run does not establish a stable speedup magnitude. These results are specific to the tested model, CPU and build configuration.
+
+Regression commands:
+
+```sh
+./build/bin/test-quantize-fns -v
+./build/bin/test-backend-ops -b CPU -o MUL_MAT \
+  -p '^type_a=q[2-6]_K,type_b=f32,m=16,n=[1-9],k=(256|4096),bs=\[1,1\],nr=\[1,1\],'
+```

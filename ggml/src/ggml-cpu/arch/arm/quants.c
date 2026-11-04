@@ -130,9 +130,55 @@ void quantize_row_q8_1(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, i
 #endif
 }
 
-// placeholder implementation for Apple targets
+#if defined(__aarch64__) && defined(__ARM_NEON)
+static inline int32x4_t nearest_int_f32x4(float32x4_t value) {
+    // Match nearest_int, including compiler contraction of the preceding multiply.
+    const float32x4_t rounded = vaddq_f32(value, vdupq_n_f32(12582912.0f));
+    return vsubq_s32(vandq_s32(vreinterpretq_s32_f32(rounded), vdupq_n_s32(0x007fffff)), vdupq_n_s32(0x00400000));
+}
+#endif
+
 void quantize_row_q8_K(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    assert(k % QK_K == 0);
+    block_q8_K * GGML_RESTRICT dst = y;
+    for (int64_t i = 0; i < k / QK_K; ++i, x += QK_K) {
+        float32x4_t max_abs = vdupq_n_f32(0.0f);
+        for (int j = 0; j < QK_K; j += 4) {
+            max_abs = vmaxq_f32(max_abs, vabsq_f32(vld1q_f32(x + j)));
+        }
+        const float amax = vmaxvq_f32(max_abs);
+        if (amax == 0.0f) {
+            dst[i].d = 0.0f;
+            memset(dst[i].qs, 0, QK_K);
+            continue;
+        }
+
+        // Keep the sign of the first absolute maximum, as in the reference.
+        float max = 0.0f;
+        for (int j = 0; j < QK_K; ++j) {
+            if (fabsf(x[j]) == amax) {
+                max = x[j];
+                break;
+            }
+        }
+        const float iscale = -127.0f / max;
+        const int32x4_t upper = vdupq_n_s32(127);
+        for (int j = 0; j < QK_K; j += 16) {
+            const int32x4_t q0 = vminq_s32(upper, nearest_int_f32x4(vmulq_n_f32(vld1q_f32(x + j +  0), iscale)));
+            const int32x4_t q1 = vminq_s32(upper, nearest_int_f32x4(vmulq_n_f32(vld1q_f32(x + j +  4), iscale)));
+            const int32x4_t q2 = vminq_s32(upper, nearest_int_f32x4(vmulq_n_f32(vld1q_f32(x + j +  8), iscale)));
+            const int32x4_t q3 = vminq_s32(upper, nearest_int_f32x4(vmulq_n_f32(vld1q_f32(x + j + 12), iscale)));
+            const int8x16_t qs = vcombine_s8(vmovn_s16(vcombine_s16(vmovn_s32(q0), vmovn_s32(q1))),
+                                            vmovn_s16(vcombine_s16(vmovn_s32(q2), vmovn_s32(q3))));
+            vst1q_s8(dst[i].qs + j, qs);
+            dst[i].bsums[j / 16] = vaddlvq_s8(qs);
+        }
+        dst[i].d = 1.0f / iscale;
+    }
+#else
     quantize_row_q8_K_ref(x, y, k);
+#endif
 }
 
 //===================================== Dot products =================================

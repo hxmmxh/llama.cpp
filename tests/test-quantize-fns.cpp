@@ -2,11 +2,13 @@
 
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "../ggml/src/ggml-quants.h"
 
 #undef NDEBUG
 #include <assert.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <math.h>
 #include <stdio.h>
 #include <string>
@@ -155,6 +157,62 @@ static int test_vec_dot_f32(bool verbose) {
     return num_failed;
 }
 
+#if defined(__aarch64__) && defined(__ARM_NEON)
+static int test_quantize_q8_k_exact(bool verbose) {
+    const auto quantize = ggml_get_type_traits_cpu(GGML_TYPE_Q8_K)->from_float;
+    uint32_t state = 42;
+    int num_failed = 0;
+
+    for (int n : {256, 512, 2560, 10240}) {
+        for (int offset : {0, 1}) {
+            std::vector<float> input(n + offset);
+            float * x = input.data() + offset;
+            std::vector<block_q8_K> ref(n / QK_K);
+            std::vector<block_q8_K> got(n / QK_K);
+            for (int pattern = 0; pattern < 40; ++pattern) {
+                for (int j = 0; j < n; ++j) {
+                    state = state * 1664525u + 1013904223u;
+                    x[j] = (float(state >> 8) / 8388608.0f - 1.0f) * (pattern & 1 ? 1e-20f : 1e20f);
+                    switch (pattern) {
+                        case 0: x[j] = 0.0f; break;
+                        case 1: x[j] = j & 1 ? -1.0f : 1.0f; break;
+                        case 2: x[j] = j & 1 ? 1.0f : -1.0f; break;
+                        case 3: x[j] = float(j % 255 - 127) + 0.5f; break;
+                        case 4: x[j] = j % QK_K == QK_K - 1 ? -127.0f : 0.5f; break;
+                        case 5: x[j] = j % QK_K == QK_K - 1 ? -127.0f : 0.5f * float(j % 255 - 127); break;
+                        case 6: x[j] = j % QK_K == QK_K - 1 ? 127.0f : 0.5f * float(j % 255 - 127); break;
+                        case 7: x[j] = -0.0f; break;
+                        case 8: x[j] = j / QK_K % 2 ? x[j] : 0.0f; break;
+                        case 9:
+                        case 10:
+                            x[j] = j % QK_K == QK_K - 1 ? -127.0f : std::nextafter(0.5f * float(j % 255 - 127), pattern == 9 ? -INFINITY : INFINITY);
+                            break;
+                        default:
+                            if (pattern < 27) {
+                                // Opposite-sign maxima straddle SIMD lanes; the first one sets the scale sign.
+                                const float maximum = pattern & 1 ? 127.0f : -127.0f;
+                                x[j] = j % QK_K == pattern - 11 ? maximum : j % QK_K == QK_K - 1 ? -maximum : 0.25f * float(j % 31 - 15);
+                            }
+                            break;
+                    }
+                }
+                // The reference leaves zero-block bsums untouched; compare all bytes from the same sentinel.
+                std::memset(ref.data(), 0xa5, ref.size() * sizeof(block_q8_K));
+                std::memset(got.data(), 0xa5, got.size() * sizeof(block_q8_K));
+                quantize_row_q8_K_ref(x, ref.data(), n);
+                quantize(x, got.data(), n);
+                const bool failed = std::memcmp(ref.data(), got.data(), ref.size() * sizeof(block_q8_K)) != 0;
+                num_failed += failed;
+                if (failed || verbose) {
+                    printf(" q8_K exact n=%5d offset=%d pattern=%2d: %s\n", n, offset, pattern, RESULT_STR[failed]);
+                }
+            }
+        }
+    }
+    return num_failed;
+}
+#endif
+
 static int test_vec_dot_q(bool verbose) {
     int num_failed = 0;
 
@@ -299,6 +357,9 @@ int main(int argc, char * argv[]) {
     int num_failed = 0;
 
     num_failed += test_vec_dot_f32(verbose);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    num_failed += test_quantize_q8_k_exact(verbose);
+#endif
     num_failed += test_vec_dot_q(verbose);
     num_failed += test_quantize_imatrix_degenerate(verbose);
 
