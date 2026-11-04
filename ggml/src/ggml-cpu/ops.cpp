@@ -1586,12 +1586,85 @@ void ggml_compute_forward_mean(
 
 // ggml_compute_forward_argmax
 
+#if defined(__aarch64__) && defined(__ARM_NEON)
+static bool ggml_argmax_f32_neon(const float * src, int n, int * result) {
+    float32x4_t maxima = vdupq_n_f32(-INFINITY);
+    int32x4_t indices = vdupq_n_s32(-1);
+    uint32x4_t unordered = vdupq_n_u32(0);
+    const int32_t initial[4] = {0, 1, 2, 3};
+    int32x4_t positions = vld1q_s32(initial);
+    int i = 0;
+    for (; i <= n - 4; i += 4) {
+        const float32x4_t values = vld1q_f32(src + i);
+        const uint32x4_t take = vcgeq_f32(values, maxima);
+        unordered = vorrq_u32(unordered, vmvnq_u32(vceqq_f32(values, values)));
+        maxima = vbslq_f32(take, values, maxima);
+        indices = vbslq_s32(take, positions, indices);
+        positions = vaddq_s32(positions, vdupq_n_s32(4));
+    }
+    const float max_lane = vmaxvq_f32(maxima);
+    const int32x4_t winners = vbslq_s32(vceqq_f32(maxima, vdupq_n_f32(max_lane)), indices, vdupq_n_s32(-1));
+    int idx = vmaxvq_s32(winners);
+    float max = max_lane;
+    bool has_nan = vmaxvq_u32(unordered) != 0;
+    for (; i < n; ++i) {
+        has_nan = has_nan || std::isnan(src[i]);
+        if (src[i] >= max) {
+            max = src[i];
+            idx = i;
+        }
+    }
+    *result = idx;
+    return has_nan;
+}
+#endif
+
 static void ggml_compute_forward_argmax_f32(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
 
     const ggml_tensor * src0 = dst->src[0];
 
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (src0->ne[0] >= 16384 && src0->ne[1] == 1 && params->nth > 1) {
+        struct partial_argmax {
+            float value;
+            int32_t index;
+            int32_t has_nan;
+        };
+        static_assert(sizeof(partial_argmax) <= CACHE_LINE_SIZE, "argmax scratch stride");
+        GGML_ASSERT(params->wsize >= CACHE_LINE_SIZE * (size_t) params->nth);
+        GGML_ASSERT(src0->nb[0] == sizeof(float));
+        const float * src = (const float *) src0->data;
+        const int n = (int) src0->ne[0];
+        const int begin = (int) ((int64_t) n * params->ith / params->nth);
+        const int end = (int) ((int64_t) n * (params->ith + 1) / params->nth);
+        auto * partial = (partial_argmax *) ((char *) params->wdata + CACHE_LINE_SIZE * params->ith);
+        int idx = -1;
+        partial->has_nan = ggml_argmax_f32_neon(src + begin, end - begin, &idx);
+        partial->index = idx < 0 ? -1 : begin + idx;
+        partial->value = idx < 0 ? -INFINITY : src[partial->index];
+        ggml_barrier(params->threadpool);
+        if (params->ith == 0) {
+            int result = 0;
+            float maximum = -INFINITY;
+            bool has_nan = false;
+            for (int i = 0; i < params->nth; ++i) {
+                const auto * part = (const partial_argmax *) ((const char *) params->wdata + CACHE_LINE_SIZE * i);
+                has_nan = has_nan || part->has_nan;
+                if (part->index >= 0 && part->value >= maximum) {
+                    maximum = part->value;
+                    result = part->index;
+                }
+            }
+            if (has_nan) {
+                ggml_vec_argmax_f32(n, &result, src);
+            }
+            *(int32_t *) dst->data = result;
+        }
+        return;
+    }
+#endif
     if (params->ith != 0) {
         return;
     }
@@ -1609,7 +1682,14 @@ static void ggml_compute_forward_argmax_f32(
         float * src = (float *) ((char *) src0->data + i1*nb01);
         int32_t * dst_ = (int32_t *) ((char *)  dst->data + i1*nb0);
         int v = 0;
+#if defined(__aarch64__) && defined(__ARM_NEON)
+        // NaNs make the original MAX loop order-dependent.
+        if (ne00 < 16 || ggml_argmax_f32_neon(src, ne00, &v)) {
+            ggml_vec_argmax_f32(ne00, &v, src);
+        }
+#else
         ggml_vec_argmax_f32(ne00, &v, src);
+#endif
         dst_[0] = v;
     }
 }

@@ -15,6 +15,7 @@
 #include <cstring>
 #include <cassert>
 #include <cstdio>  // for GGML_ASSERT
+#include <type_traits>
 
 #include "repack.h"
 
@@ -259,10 +260,9 @@ void ggml_quantize_mat_q8_K_4x4_generic(const float * GGML_RESTRICT x, void * GG
     }
 }
 
-void ggml_quantize_mat_q8_K_4x8_generic(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+static void ggml_quantize_mat_q8_K_4x8_range(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k, int begin, int end) {
     assert(QK_K == 256);
     assert(k % QK_K == 0);
-    const int nb = k / QK_K;
 
     block_q8_Kx4 * GGML_RESTRICT y = (block_q8_Kx4 *) vy;
 
@@ -271,7 +271,7 @@ void ggml_quantize_mat_q8_K_4x8_generic(const float * GGML_RESTRICT x, void * GG
     float srcv[4][QK_K];
     float iscale[4];
 
-    for (int i = 0; i < nb; i++) {
+    for (int i = begin; i < end; i++) {
         for (int row_iter = 0; row_iter < 4; row_iter++) {
             float amax = 0.0f; // absolute max
             float max = 0;
@@ -308,6 +308,10 @@ void ggml_quantize_mat_q8_K_4x8_generic(const float * GGML_RESTRICT x, void * GG
             y[i].bsums[index] += y[i].qs[j];
         }
     }
+}
+
+void ggml_quantize_mat_q8_K_4x8_generic(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    ggml_quantize_mat_q8_K_4x8_range(x, vy, k, 0, k / QK_K);
 }
 
 } // extern "C"
@@ -4640,6 +4644,15 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
                                                              src0_ptr + src0_start * nb01, src1_ptr,
                                                              nrows - (nrows % 4), ncols);
         }
+#if defined(__aarch64__) && defined(__ARM_NEON) && defined(__ARM_FEATURE_DOTPROD)
+        if (INTER_SIZE == 8 && NB_COLS == 8 && PARAM_TYPE == GGML_TYPE_Q8_K && nrows == 7 &&
+                (std::is_same<BLOC_TYPE, block_q4_K>::value || std::is_same<BLOC_TYPE, block_q6_K>::value)) {
+            gemv<BLOC_TYPE, INTER_SIZE, NB_COLS, PARAM_TYPE>(ne00,
+                (float *) (dst_ptr + 4 * nb1) + src0_start, nb1 / nb0,
+                src0_ptr + src0_start * nb01, src1_ptr + 4 * src1_col_stride, 3, ncols);
+            return;
+        }
+#endif
         for (int iter = nrows - (nrows % 4); iter < nrows; iter++) {
             gemv<BLOC_TYPE, INTER_SIZE, NB_COLS, PARAM_TYPE>(ne00, (float *) (dst_ptr + (iter * nb1)) + src0_start,
                                                              ne01, src0_ptr + src0_start * nb01,
@@ -4693,6 +4706,28 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
         for (int64_t i12 = 0; i12 < ne12; i12++) {
             char * data_ptr  = (char *) src1->data + i12 * nb12;
             char * wdata_ptr = wdata + i12 * nbw2;
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+            if (INTER_SIZE == 8 && PARAM_TYPE == GGML_TYPE_Q8_K &&
+                (ne11 == 7 || ne11 == 8) && ne10 >= 1024 && nth > 1) {
+                const int64_t n_blocks = ne10 / QK_K;
+                const int64_t packed_rows = ne11 - ne11 % 4;
+                const int64_t blocks_per_thread = (n_blocks + nth - 1) / nth;
+                const int begin = std::min(ith * blocks_per_thread, n_blocks);
+                const int end = std::min((ith + 1) * blocks_per_thread, n_blocks);
+                for (int64_t row = 0; row < packed_rows; row += 4) {
+                    ggml_quantize_mat_q8_K_4x8_range((const float *) (data_ptr + row * nb11),
+                                                   wdata_ptr + row * nbw1, ne10, begin, end);
+                }
+                if (begin < end) {
+                    for (int64_t row = packed_rows; row < ne11; row++) {
+                        from_float((const float *) (data_ptr + row * nb11) + begin * QK_K,
+                                   wdata_ptr + row * nbw1 + begin * sizeof(block_q8_K), (end - begin) * QK_K);
+                    }
+                }
+                continue;
+            }
+#endif
 
             for (int64_t i11 = ith * 4; i11 < ne11 - ne11 % 4; i11 += nth * 4) {
                 ggml_quantize_mat_t<INTER_SIZE, PARAM_TYPE>((float *) (data_ptr + i11 * nb11),

@@ -1138,7 +1138,21 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
         output_s = model_other->output_s;
     }
 
-    cur = build_lora_mm(output, cur, output_s);
+    const bool pad_shared_head = model.dspark_markov_w1 && model.output == nullptr &&
+        ubatch.n_seqs_unq == 1 && cur->type == GGML_TYPE_F32 &&
+        cur->ne[0] == 2560 && cur->ne[1] == 7 && cur->ne[2] == 1 && cur->ne[3] == 1 &&
+        output->type == GGML_TYPE_Q8_0 && output->ne[0] == 2560 && output->ne[1] == 131072 &&
+        output->buffer && strcmp(ggml_backend_buft_name(ggml_backend_buffer_get_type(output->buffer)), "CPU_REPACK") == 0 &&
+        std::getenv("DSPARK_HEAD_PAD_DISABLE") == nullptr;
+    if (pad_shared_head) {
+        // Keep the model block unchanged; pad only this projection's activation rows.
+        ggml_tensor * padded = ggml_pad(ctx0, cur, 0, 1, 0, 0);
+        cur = build_lora_mm(output, padded, output_s);
+        cb(cur, "dspark_head_padded", -1);
+        cur = ggml_view_2d(ctx0, cur, cur->ne[0], 7, cur->nb[1], 0);
+    } else {
+        cur = build_lora_mm(output, cur, output_s);
+    }
 
     // DFlash2 feeds these logits to the selector, so they need the target's output
     // transforms; DFlash1 and DSpark read them through the sampler instead

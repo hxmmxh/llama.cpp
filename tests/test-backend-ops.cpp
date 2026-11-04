@@ -11194,6 +11194,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_argmax(GGML_TYPE_F32, {2000, 10, 1, 1}));
     test_cases.emplace_back(new test_argmax(GGML_TYPE_F32, {5438,  3, 1, 1}));
 
+    // Cover the SIMD and parallel thresholds, odd tails and multi-row fallback.
+    for (int64_t width : {15, 16, 17, 16383, 16384, 16385, 131072, 131073}) {
+        for (int64_t rows : {1, 3}) {
+            test_cases.emplace_back(new test_argmax(GGML_TYPE_F32, {width, rows, 1, 1}));
+        }
+    }
+
     for (int ne3 : {1, 3}) { // CUDA backward pass only supports ne3 == 1
         test_cases.emplace_back(new test_repeat(GGML_TYPE_F32, {10, 5, 4, ne3}, {1, 1, 1, 1}));
         test_cases.emplace_back(new test_repeat(GGML_TYPE_F32, {10, 5, 4, ne3}, {2, 1, 1, 1}));
@@ -11713,6 +11720,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat(type_a,    GGML_TYPE_F32, 16,  1, 16*256, { 1,  1}, {1, 1}));
         test_cases.emplace_back(new test_mul_mat(type_a,    GGML_TYPE_F32, 16,  8, 16*256, { 1,  1}, {1, 1}));
     }
+
+    // Cover packed M7/M8 preparation, tail3, GEMM8 and neighboring row counts.
+    for (ggml_type type_a : {GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K}) {
+        for (int64_t k : {1024, 2560, 10240}) {
+            for (int64_t n : {6, 7, 8, 9}) {
+                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 16, n, k, {1, 1}, {1, 1}));
+            }
+        }
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 16, 7, 2560, {1, 3}, {1, 1}));
+    }
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_BF16, GGML_TYPE_F32, 16, 7, 257, {1, 1}, {1, 1}));
 
     // Multi-column MMVQ coverage for the Q4_K weight-reuse path and a Q5_K control.
     for (ggml_type type_a : { GGML_TYPE_Q4_K, GGML_TYPE_Q5_K }) {

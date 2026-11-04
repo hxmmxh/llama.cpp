@@ -2287,9 +2287,17 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_SUM:
         case GGML_OP_SUM_ROWS:
         case GGML_OP_MEAN:
+            {
+                n_tasks = 1;
+            } break;
         case GGML_OP_ARGMAX:
             {
                 n_tasks = 1;
+#if defined(__aarch64__) && defined(__ARM_NEON)
+                if (node->src[0]->ne[0] >= 16384 && node->src[0]->ne[1] == 1) {
+                    n_tasks = n_threads;
+                }
+#endif
             } break;
         case GGML_OP_COUNT_EQUAL:
         case GGML_OP_SOLVE_TRI:
@@ -2885,6 +2893,14 @@ struct ggml_cplan ggml_graph_plan(
                         if (ggml_is_quantized(node->src[0]->type)) {
                             cur = ggml_type_size(GGML_TYPE_F32) * node->src[1]->ne[0] * n_tasks;
                         }
+                    } break;
+                case GGML_OP_ARGMAX:
+                    {
+#if defined(__aarch64__) && defined(__ARM_NEON)
+                        if (node->src[0]->ne[0] >= 16384 && node->src[0]->ne[1] == 1) {
+                            cur = CACHE_LINE_SIZE * (size_t) n_threads;
+                        }
+#endif
                     } break;
                 case GGML_OP_COUNT_EQUAL:
                     {

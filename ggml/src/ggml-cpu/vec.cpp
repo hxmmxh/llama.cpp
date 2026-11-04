@@ -195,6 +195,28 @@ void ggml_vec_dot_bf16(int n, float * GGML_RESTRICT s, size_t bs, ggml_bf16_t * 
     sumf += (ggml_float)_mm_cvtss_f32(g);
 
 #undef LOAD
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+    // Keep F32 products and F64 accumulation, as in the scalar fallback.
+    float64x2_t c0 = vdupq_n_f64(0.0);
+    float64x2_t c1 = vdupq_n_f64(0.0);
+    float64x2_t c2 = vdupq_n_f64(0.0);
+    float64x2_t c3 = vdupq_n_f64(0.0);
+    for (; i + 8 <= n; i += 8) {
+        const uint16x8_t ax = vld1q_u16((const uint16_t *) (x + i));
+        const uint16x8_t ay = vld1q_u16((const uint16_t *) (y + i));
+        const float32x4_t x0 = vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(ax), 16));
+        const float32x4_t x1 = vreinterpretq_f32_u32(vshll_high_n_u16(ax, 16));
+        const float32x4_t y0 = vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(ay), 16));
+        const float32x4_t y1 = vreinterpretq_f32_u32(vshll_high_n_u16(ay, 16));
+        const float32x4_t p0 = vmulq_f32(x0, y0);
+        const float32x4_t p1 = vmulq_f32(x1, y1);
+        c0 = vaddq_f64(c0, vcvt_f64_f32(vget_low_f32(p0)));
+        c1 = vaddq_f64(c1, vcvt_f64_f32(vget_high_f32(p0)));
+        c2 = vaddq_f64(c2, vcvt_f64_f32(vget_low_f32(p1)));
+        c3 = vaddq_f64(c3, vcvt_f64_f32(vget_high_f32(p1)));
+    }
+    sumf += vaddvq_f64(vaddq_f64(vaddq_f64(c0, c1), vaddq_f64(c2, c3)));
+
 #elif defined(__riscv_v_intrinsic) && defined(__riscv_zvfbfwma)
     size_t vl = __riscv_vsetvlmax_e32m4();
 
