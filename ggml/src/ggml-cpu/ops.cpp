@@ -8815,6 +8815,66 @@ void ggml_compute_forward_top_k(
     }
 }
 
+static void ggml_compute_forward_flash_attn_ext_f16_group4(
+        const ggml_compute_params * params,
+        ggml_tensor * dst,
+        int head,
+        int64_t ic_start, int64_t ic_end,
+        float * partials, int64_t partial_stride) {
+    const ggml_tensor * q = dst->src[0];
+    const ggml_tensor * k = dst->src[1];
+    const ggml_tensor * v = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+    const ggml_fp16_t * mp = mask ? (const ggml_fp16_t *) mask->data : nullptr;
+    const int kv_head = head / 4;
+    alignas(64) ggml_fp16_t query[4][256];
+    alignas(64) ggml_fp16_t accum[4][256] = {};
+    float sum[4] = {};
+    float maximum[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};
+    float scale;
+    memcpy(&scale, dst->op_params, sizeof(scale));
+    for (int h = 0; h < 4; ++h) {
+        const float * row = (const float *) ((const char *) q->data + (head + h) * q->nb[2]);
+        ggml_cpu_fp32_to_fp16(row, query[h], 256);
+    }
+    for (int64_t ic = ic_start; ic < ic_end; ++ic) {
+        const float bias = mp ? GGML_CPU_FP16_TO_FP32(mp[ic]) : 0.0f;
+        if (bias == -INFINITY) {
+            continue;
+        }
+        const ggml_fp16_t * key = (const ggml_fp16_t *) ((const char *) k->data + ic * k->nb[1] + kv_head * k->nb[2]);
+        const ggml_fp16_t * value = (const ggml_fp16_t *) ((const char *) v->data + ic * v->nb[1] + kv_head * v->nb[2]);
+        // Keep the original dot product and online softmax order for each head.
+        for (int h = 0; h < 4; ++h) {
+            float score;
+            ggml_vec_dot_f16(256, &score, 0, const_cast<ggml_fp16_t *>(key), 0, query[h], 0, 1);
+            score = score * scale;
+            score += bias;
+            float ms = 1.0f;
+            float vs = 1.0f;
+            if (score > maximum[h]) {
+                const float old_maximum = maximum[h];
+                maximum[h] = score;
+                ms = expf(old_maximum - maximum[h]);
+                ggml_vec_scale_f16(256, accum[h], ms);
+            } else {
+                vs = expf(score - maximum[h]);
+            }
+            ggml_vec_mad_f16(256, accum[h], value, vs);
+            sum[h] = sum[h] * ms + vs;
+        }
+    }
+    for (int h = 0; h < 4; ++h) {
+        float * partial = partials + (head + h) * partial_stride;
+        partial[0] = maximum[h];
+        partial[1] = sum[h];
+        for (int d = 0; d < 256; ++d) {
+            partial[2 + d] = GGML_CPU_FP16_TO_FP32(accum[h][d]);
+        }
+    }
+    GGML_UNUSED(params);
+}
+
 static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         const ggml_compute_params * params,
         ggml_tensor * dst,
@@ -9477,8 +9537,36 @@ static void ggml_compute_forward_flash_attn_ext_f16(
         const int64_t partial_stride = nth * partial_size;
         float *       chunk_partials = partials_base + ith * partial_size;
 
-        if (ic_start < nek1) {
-            for (int64_t q_head = 0; q_head < neq2; q_head++) {
+        const ggml_tensor * mask = dst->src[3];
+        float max_bias;
+        float logit_softcap;
+        memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(max_bias));
+        memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(logit_softcap));
+        const bool use_group4 = k->type == GGML_TYPE_F16 && DK == 256 && DV == 256 && neq2 <= INT32_MAX &&
+            neq2 % 4 == 0 && neq2 / 4 == nek2 && nek2 == nev2 && max_bias == 0.0f && logit_softcap == 0.0f &&
+            dst->src[4] == nullptr && (!mask || (mask->type == GGML_TYPE_F16 && mask->ne[2] == 1 && mask->ne[3] == 1));
+        if (use_group4) {
+            const int64_t groups = neq2 / 4;
+            // Each job writes one head group in one chunk; the partials layout and reduction stay unchanged.
+            for (int64_t job = ith; job < nth * groups; job += nth) {
+                const int64_t part = job / groups;
+                const int64_t head = 4 * (job % groups);
+                const int64_t start = part * chunk_size;
+                const int64_t end = std::min(start + chunk_size, nek1);
+                float * group_partials = partials_base + part * partial_size;
+                if (start < nek1) {
+                    ggml_compute_forward_flash_attn_ext_f16_group4(
+                        params, dst, head, start, end, group_partials, partial_stride);
+                } else {
+                    for (int64_t h = head; h < head + 4; ++h) {
+                        float * partial = group_partials + h * partial_stride;
+                        partial[0] = -INFINITY;
+                        partial[1] = 0.0f;
+                    }
+                }
+            }
+        } else if (ic_start < nek1) {
+            for (int64_t q_head = 0; q_head < neq2; ++q_head) {
                 ggml_compute_forward_flash_attn_ext_f16_one_chunk(
                     params, dst, q_head, q_head + 1, ic_start, ic_end,
                     chunk_partials, partial_stride);

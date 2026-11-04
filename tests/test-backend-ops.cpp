@@ -12692,6 +12692,32 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // GQA4 decode: split-KV boundary, uneven chunks, and both cache layouts.
+    for (int64_t kv : {511, 512, 513, 768, 2048}) {
+        for (bool mask : {false, true}) {
+            for (std::array<int32_t, 4> permute : {std::array<int32_t, 4>{0, 1, 2, 3}, {0, 2, 1, 3}}) {
+                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, kv, 1, mask, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, permute));
+            }
+        }
+    }
+    // Sparse masks leave some chunks empty; large logits force online softmax rescaling.
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 2, 1, 3}, true, false, 32));
+    test_cases.emplace_back(new test_flash_attn_ext_large_logits(256, 256, 4, {4, 1}, 513, 1));
+
+    // GQA4 fallbacks: head sizes/ratio, multiple queries/sequences, sinks, ALiBi, softcap, and KV types.
+    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 4, {4, 1}, 513, 1));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 128, 4, {4, 1}, 513, 1));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {2, 1}, 513, 1));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 2));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 2}, 513, 1));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, true));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, false, 8.0f));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, false, 0, 30.0f));
+    for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_Q8_0}) {
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, false, 0, 0, GGML_PREC_F32, type, type));
+    }
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_Q8_0));
+
     // asymmetric head_dim (hsk != hsv) with one or both sides not 64-aligned
     test_cases.emplace_back(new test_flash_attn_ext(72, 64, 4, {1, 1}, 256, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
     test_cases.emplace_back(new test_flash_attn_ext(64, 72, 4, {1, 1}, 256, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
