@@ -3101,8 +3101,22 @@ static void ggml_compute_forward_geglu_f32(
     const int dr = (nr + nth - 1)/nth;
 
     // row range for this thread
-    const int ir0 = dr*ith;
-    const int ir1 = MIN(ir0 + dr, nr);
+    int ir0 = dr*ith;
+    int ir1 = MIN(ir0 + dr, nr);
+    int ic0 = 0;
+    int ic1 = nc;
+
+    // Short rows do not amortize the extra worker activity.
+    if (!params->use_ref && nr == 1 && nc >= 4096 && nth > 1) {
+        const int64_t dc = GGML_PAD((int64_t(nc) + nth - 1) / nth, 16);
+        ic0 = int(MIN(dc * ith, nc));
+        ic1 = int(MIN(dc * (ith + 1), nc));
+        if (ic0 == ic1) {
+            return;
+        }
+        ir0 = 0;
+        ir1 = 1;
+    }
 
     for (int i1 = ir0; i1 < ir1; i1++) {
         float * src0_p = (float *) (src0_d + i1*src0_o);
@@ -3113,10 +3127,10 @@ static void ggml_compute_forward_geglu_f32(
             src1_p += swapped ? 0 : nc;
         }
 
-        ggml_vec_geglu_f32(nc, (float *) ((char *) dst->data + i1*(dst->nb[1])), src0_p, src1_p);
+        ggml_vec_geglu_f32(ic1 - ic0, (float *) ((char *) dst->data + i1*(dst->nb[1])) + ic0, src0_p + ic0, src1_p + ic0);
 
 #ifndef NDEBUG
-        for (int k = 0; k < nc; k++) {
+        for (int k = ic0; k < ic1; k++) {
             const float x = ((float *) ((char *) dst->data + i1*( dst->nb[1])))[k];
             GGML_UNUSED(x);
             assert(!isnan(x));

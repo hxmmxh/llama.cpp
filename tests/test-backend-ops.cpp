@@ -10672,6 +10672,23 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // GEGLU column splitting: short-row fallback, threshold, and unaligned tails.
+    for (int64_t nc : {1024, 2560, 4095, 4096, 4097, 10240, 10241}) {
+        for (int v : {0, 1}) {
+            for (bool swapped : {false, true}) {
+                test_cases.emplace_back(new test_glu(GGML_GLU_OP_GEGLU, GGML_TYPE_F32, {2 * nc, 1, 1, 1}, v, swapped));
+            }
+            test_cases.emplace_back(new test_glu_split(GGML_GLU_OP_GEGLU, GGML_TYPE_F32, {nc, 1, 1, 1}, v));
+        }
+    }
+    // Multiple rows keep the existing row scheduling, including padded views.
+    for (int v : {0, 1}) {
+        for (bool swapped : {false, true}) {
+            test_cases.emplace_back(new test_glu(GGML_GLU_OP_GEGLU, GGML_TYPE_F32, {8194, 2, 1, 1}, v, swapped));
+        }
+        test_cases.emplace_back(new test_glu_split(GGML_GLU_OP_GEGLU, GGML_TYPE_F32, {4097, 2, 1, 1}, v));
+    }
+
     for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16}) {
         for (int v : {0, 1}) {
             for (float alpha : {.5f, 1.702f}) {
