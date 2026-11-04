@@ -9173,6 +9173,31 @@ struct test_flash_attn_ext_large_logits : public test_flash_attn_ext {
     }
 };
 
+struct test_flash_attn_ext_q8_mask : public test_flash_attn_ext {
+    const int mask_mode;
+
+    test_flash_attn_ext_q8_mask(int64_t length, int mask_mode)
+        : test_flash_attn_ext(256, 256, 4, {4, 1}, length, 1, true, false, 0, 0,
+            GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 2, 1, 3}), mask_mode(mask_mode) {}
+
+    std::string vars() override {
+        return test_flash_attn_ext::vars() + ",mask_mode=" + std::to_string(mask_mode);
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_flash_attn_ext::initialize_tensors(ctx);
+        std::vector<ggml_fp16_t> values(kv);
+        for (int64_t i = 0; i < kv; ++i) {
+            const bool masked = mask_mode == 0 ||
+                (mask_mode == 1 && (i < 17 || i >= kv - 7)) ||
+                (mask_mode == 2 && i != kv - 1) ||
+                (mask_mode == 3 && i % 3 != 0);
+            values[i] = ggml_fp32_to_fp16(masked ? -INFINITY : -0.125f * (i % 7));
+        }
+        ggml_backend_tensor_set(ggml_get_tensor(ctx, "m"), values.data(), 0, values.size() * sizeof(ggml_fp16_t));
+    }
+};
+
 // GGML_OP_CROSS_ENTROPY_LOSS
 struct test_spark_attention : public test_flash_attn_ext {
     const int scenario;
@@ -12719,6 +12744,33 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
     test_cases.emplace_back(new test_flash_attn_ext_large_logits(256, 256, 4, {4, 1}, 513, 4, true, true, 8.0f, 30.0f,
+        GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+
+    // Q8 GQA2: dispatch boundary, both cache layouts, and empty or sparse masks.
+    for (int64_t kv : {511, 512, 513, 2048}) {
+        for (bool mask : {false, true}) {
+            for (std::array<int32_t, 4> permute : {std::array<int32_t, 4>{0, 1, 2, 3}, {0, 2, 1, 3}}) {
+                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, kv, 1, mask, false, 0, 0,
+                    GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, permute));
+            }
+        }
+    }
+    for (int mode : {0, 1, 2, 3}) {
+        test_cases.emplace_back(new test_flash_attn_ext_q8_mask(513, mode));
+    }
+    test_cases.emplace_back(new test_flash_attn_ext_large_logits(256, 256, 4, {4, 1}, 513, 1, true, false, 0, 0,
+        GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+
+    // Q8 GQA2 fallbacks: head ratio, multiple sequences, sinks, ALiBi, and softcap.
+    for (std::array<int64_t, 2> nr : {std::array<int64_t, 2>{2, 1}, {4, 2}}) {
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, nr, 513, 1, true, false, 0, 0,
+            GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    }
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, true, 0, 0,
+        GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, false, 8.0f, 0,
+        GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, false, 0, 30.0f,
         GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 
     // GQA4 decode: split-KV boundary, uneven chunks, and both cache layouts.

@@ -27,4 +27,27 @@ static inline void ggml_vec_mad_q8_0_f32(
         }
     }
 }
+
+static inline void ggml_vec_mad_q8_0_f32_group2(
+        float y[2][256], const block_q8_0 * x, const float v[2]) {
+    for (int i = 0; i < 256 / QK8_0; ++i) {
+        const float d = GGML_CPU_FP16_TO_FP32(x[i].d);
+        for (int j = 0; j < QK8_0; j += 16) {
+            const int8x16_t q = vld1q_s8(x[i].qs + j);
+            const int16x8_t lo = vmovl_s8(vget_low_s8(q));
+            const int16x8_t hi = vmovl_s8(vget_high_s8(q));
+            const float32x4_t a = vmulq_n_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))), d);
+            const float32x4_t b = vmulq_n_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), d);
+            const float32x4_t c = vmulq_n_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))), d);
+            const float32x4_t e = vmulq_n_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), d);
+            for (int h = 0; h < 2; ++h) {
+                float * dst = y[h] + i * QK8_0 + j;
+                vst1q_f32(dst,      vfmaq_n_f32(vld1q_f32(dst),      a, v[h]));
+                vst1q_f32(dst + 4,  vfmaq_n_f32(vld1q_f32(dst + 4),  b, v[h]));
+                vst1q_f32(dst + 8,  vfmaq_n_f32(vld1q_f32(dst + 8),  c, v[h]));
+                vst1q_f32(dst + 12, vfmaq_n_f32(vld1q_f32(dst + 12), e, v[h]));
+            }
+        }
+    }
+}
 #endif

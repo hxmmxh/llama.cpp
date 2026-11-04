@@ -9493,6 +9493,60 @@ static void ggml_flash_attn_ext_reduce_partials(
     }
 }
 
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(__ARM_FEATURE_SVE)
+static void ggml_compute_forward_flash_attn_ext_q8_group2(
+        ggml_tensor * dst, const int64_t group,
+        const int64_t begin, const int64_t end, const float scale) {
+    const int64_t kv_head = group / 2;
+    const ggml_tensor * q = dst->src[0];
+    const ggml_tensor * k = dst->src[1];
+    const ggml_tensor * v = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+    const auto q_to_q8 = ggml_get_type_traits_cpu(GGML_TYPE_Q8_0)->from_float;
+    const auto dot = ggml_get_type_traits_cpu(GGML_TYPE_Q8_0)->vec_dot;
+    block_q8_0 queries[2][256 / QK8_0];
+    float accum[2][256] = {};
+    float maximum[2] = {-INFINITY, -INFINITY};
+    float sum[2] = {};
+    for (int h = 0; h < 2; ++h) {
+        q_to_q8((const float *) ((const char *) q->data + (group * 2 + h) * q->nb[2]), queries[h], 256);
+    }
+    const ggml_fp16_t * mp = mask ? (const ggml_fp16_t *) mask->data : nullptr;
+    for (int64_t t = begin; t < end; ++t) {
+        const float bias = mp ? GGML_CPU_FP16_TO_FP32(mp[t]) : 0.0f;
+        if (bias == -INFINITY) {
+            continue;
+        }
+        const char * key = (const char *) k->data + t * k->nb[1] + kv_head * k->nb[2];
+        const auto value = (const block_q8_0 *) ((const char *) v->data + t * v->nb[1] + kv_head * v->nb[2]);
+        float weights[2];
+        for (int h = 0; h < 2; ++h) {
+            float score;
+            dot(256, &score, 0, key, 0, queries[h], 0, 1);
+            score = score * scale;
+            score += bias;
+            float ms = 1.0f;
+            float vs = 1.0f;
+            if (score > maximum[h]) {
+                ms = expf(maximum[h] - score);
+                maximum[h] = score;
+                ggml_vec_scale_f32(256, accum[h], ms);
+            } else {
+                vs = expf(score - maximum[h]);
+            }
+            sum[h] = sum[h] * ms + vs;
+            weights[h] = vs;
+        }
+        ggml_vec_mad_q8_0_f32_group2(accum, value, weights);
+    }
+    for (int h = 0; h < 2; ++h) {
+        const float sum_inv = sum[h] == 0.0f ? 0.0f : 1.0f / sum[h];
+        ggml_vec_scale_f32(256, accum[h], sum_inv);
+        memcpy((char *) dst->data + (group * 2 + h) * dst->nb[1], accum[h], sizeof(accum[h]));
+    }
+}
+#endif
+
 static void ggml_compute_forward_flash_attn_ext_f16(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
@@ -9540,6 +9594,37 @@ static void ggml_compute_forward_flash_attn_ext_f16(
 
     // When use_ref is set, force the vec-only reference implementation (no tiling, no KV-chunking)
     const bool use_ref = params->use_ref;
+
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(__ARM_FEATURE_SVE)
+    float q8_scale, q8_bias, q8_softcap;
+    memcpy(&q8_scale,   (const float *) dst->op_params + 0, sizeof(float));
+    memcpy(&q8_bias,    (const float *) dst->op_params + 1, sizeof(float));
+    memcpy(&q8_softcap, (const float *) dst->op_params + 2, sizeof(float));
+    const ggml_tensor * q8_mask = dst->src[3];
+    const bool use_q8_group2 = !use_ref && q->type == GGML_TYPE_F32 &&
+        k->type == GGML_TYPE_Q8_0 && v->type == GGML_TYPE_Q8_0 && DK == 256 && DV == 256 &&
+        neq1 == 1 && neq3 == 1 && nek3 == 1 && nev3 == 1 && nek1 >= 512 && nev1 == nek1 && nek2 > 0 &&
+        neq2 / 2 >= nth && neq2 <= INT32_MAX && neq2 % 4 == 0 && neq2 / 4 == nek2 && nek2 == nev2 &&
+        dst->src[4] == nullptr && q8_bias == 0.0f && q8_softcap == 0.0f &&
+        (!q8_mask || (q8_mask->type == GGML_TYPE_F16 && q8_mask->ne[2] == 1 && q8_mask->ne[3] == 1));
+    if (use_q8_group2) {
+        int64_t begin = 0, end = nek1;
+        if (q8_mask) {
+            const auto mp = (const ggml_fp16_t *) q8_mask->data;
+            while (begin < end && GGML_CPU_FP16_TO_FP32(mp[begin]) == -INFINITY) {
+                ++begin;
+            }
+            while (end > begin && GGML_CPU_FP16_TO_FP32(mp[end - 1]) == -INFINITY) {
+                --end;
+            }
+        }
+        // Keep each head's full KV traversal and normalization order.
+        for (int64_t group = ith; group < neq2 / 2; group += nth) {
+            ggml_compute_forward_flash_attn_ext_q8_group2(dst, group, begin, end, q8_scale);
+        }
+        return;
+    }
+#endif
 
     const bool kv_is_f32_or_f16 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
     const bool use_split_kv_path = !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
