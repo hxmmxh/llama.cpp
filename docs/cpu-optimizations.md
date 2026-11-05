@@ -140,3 +140,8 @@ Regression commands:
 **x64 Q8 multirow signed dot (2026-11-05)**
 
 [Validation and scope](q8-multirow-20261105.md): the AVX-VNNI-INT8 tinyBLAS path removes sign conversions. Fixed-history logits and eight seeded DSpark outputs/acceptance counts match the frozen release. Historical comparison observes M8 cost down about 9%, draft cost down 18.2%, and generation throughput up 8.3%; ordinary generation remains ahead. The alternative 2x4 tile is not integrated.
+
+
+**x64 Q6 M8 valid columns and signed dot (2026-11-05)**
+
+[Validation and scope](q6-m8-20261105.md): compute eight valid positions in the Q6 narrow path and use signed-byte VNNI where available. Ultra 7 fixed-history M8 cost falls from 123.484/137.955 ms to 108.845/121.431 ms at D128/D512 versus the historical Q8-signed build (about 12%). The selected three-file change matches the tested snapshot. Other candidates remain experimental; this round does not measure end-to-end DSpark throughput.

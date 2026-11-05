@@ -223,11 +223,16 @@ static void tiled_run_microtile_vnni(const tiled_tile_src0 & src0, const tiled_t
 //     Fits only when the debiased weight magnitude Wmax <= 64 (2*255*Wmax < 32767).
 //   else (iq4_xs, Wmax = 127): the signed-int8 sign trick, ax = |w|, sy = q1*sign(w),
 //     one maddubs (2*127*127 < 32767) so it always fits.
-template <int SUBBLK, bool HAS_MIN, int BIAS, int NK, bool ACTBIAS>
+template <int SUBBLK, bool HAS_MIN, int BIAS, int NK, bool ACTBIAS, int NC = TILED_MICRO>
 static void tiled_run_microtile_avx2(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
                                      int i0, int j0, int num_k, int slab, float * buf, int buf_stride) {
     constexpr int NB = TILED_TILE_K / SUBBLK;
     constexpr int GROUP = 8; // Process 8 src1 columns concurrently (1 YMM vector)
+#if defined(__AVXVNNIINT8__)
+    constexpr bool signed_q6 = SUBBLK == 16 && !HAS_MIN && BIAS == 32 && ACTBIAS && NC == 8;
+#else
+    constexpr bool signed_q6 = false;
+#endif
 
     static_assert(SUBBLK == 16 || SUBBLK == 32, "unsupported SUBBLK");
 
@@ -253,7 +258,7 @@ static void tiled_run_microtile_avx2(const tiled_tile_src0 & src0, const tiled_t
         const int32_t * scales_row = &src0.scales[ar * nb_stride + nb_off];
         const int32_t * mins_row = &src0.mins[ar * nb_stride + nb_off];
 
-        for (int g = 0; g < TILED_MICRO; g += GROUP) {
+        for (int g = 0; g < NC; g += GROUP) {
             // Pre-calculate weight pointers for this column group
             const int8_t * q1_ptr[GROUP];
             for (int t = 0; t < GROUP; t++) {
@@ -316,12 +321,24 @@ static void tiled_run_microtile_avx2(const tiled_tile_src0 & src0, const tiled_t
                     if constexpr (BIAS != 0) {
                         const __m256i w = _mm256_sub_epi8(q0_32, _mm256_set1_epi8((int8_t) BIAS)); // debiased weight
                         if constexpr (ACTBIAS) {
-                            // activation pre-biased (+128) by repack; q1b unsigned, w signed
-                            #pragma GCC unroll 8
-                            for (int t = 0; t < GROUP; t++) {
-                                const __m256i q1b_32 = _mm256_load_si256((const __m256i *) &q1_ptr[t][sp * SUBBLK]);
-                                acc[t] = _mm256_add_epi32(acc[t], _mm256_madd_epi16(
-                                    scalesv, _mm256_maddubs_epi16(q1b_32, w)));
+#if defined(__AVXVNNIINT8__)
+                            if constexpr (signed_q6) {
+                                const __m256i scales32 = _mm256_set_m128i(_mm_set1_epi32(scales_row[sp + 1]), _mm_set1_epi32(scales_row[sp]));
+                                #pragma GCC unroll 8
+                                for (int t = 0; t < GROUP; t++) {
+                                    const __m256i q1_32 = _mm256_load_si256((const __m256i *) &q1_ptr[t][sp * SUBBLK]);
+                                    const __m256i dot = _mm256_dpbssd_epi32(_mm256_setzero_si256(), q1_32, w);
+                                    acc[t] = _mm256_add_epi32(acc[t], _mm256_mullo_epi32(scales32, dot));
+                                }
+                            } else
+#endif
+                            {
+                                #pragma GCC unroll 8
+                                for (int t = 0; t < GROUP; t++) {
+                                    const __m256i q1b_32 = _mm256_load_si256((const __m256i *) &q1_ptr[t][sp * SUBBLK]);
+                                    acc[t] = _mm256_add_epi32(acc[t], _mm256_madd_epi16(
+                                        scalesv, _mm256_maddubs_epi16(q1b_32, w)));
+                                }
                             }
                         } else {
                             // iq4_xs (Wmax > 64 overflows act-bias): sign trick, both operands <= 127
@@ -366,7 +383,7 @@ static void tiled_run_microtile_avx2(const tiled_tile_src0 & src0, const tiled_t
             __m256i s1_vec = _mm256_add_epi32(lo, hi);
 
             // OPTIMIZATION 2: Vectorized Epilogue with FMA3 gating
-            if constexpr (BIAS != 0 && ACTBIAS) {
+            if constexpr (BIAS != 0 && ACTBIAS && !signed_q6) {
                 // act-bias correction: raw = desired + 128*sum_s scales[s]*w_bsum[s]; corr precomputed in repack_src0
                 s1_vec = _mm256_sub_epi32(s1_vec, _mm256_set1_epi32(mins_row[0]));
             }
@@ -504,8 +521,9 @@ static void tiled_run_microtile_avx(const tiled_tile_src0 & src0, const tiled_ti
 // version; it is memory-bound, so one version serves all of it.
 template <int SUBBLK, bool HAS_MIN, int BIAS, bool ACTBIAS>
 void tiled_run_microtile(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
-                         int i0, int j0, int num_k, int slab, float * buf, int buf_stride) {
+                         int i0, int j0, int num_k, int slab, float * buf, int buf_stride, int n_cols) {
     const bool standard = (num_k == 1);
+    GGML_UNUSED(n_cols);
 #if defined(__AVX512VNNI__) && defined(__AVX512VL__) && defined(__AVX512DQ__)
     if (standard) {
         tiled_run_microtile_vnni<SUBBLK, HAS_MIN, BIAS, 1>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
@@ -513,6 +531,16 @@ void tiled_run_microtile(const tiled_tile_src0 & src0, const tiled_tile_src1 & s
         tiled_run_microtile_vnni<SUBBLK, HAS_MIN, BIAS, 0>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
     }
 #elif defined(__AVX2__)
+    if constexpr (SUBBLK == 16 && !HAS_MIN && BIAS == 32 && ACTBIAS) {
+        if (n_cols == 8) {
+            if (standard) {
+                tiled_run_microtile_avx2<SUBBLK, HAS_MIN, BIAS, 1, ACTBIAS, 8>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
+            } else {
+                tiled_run_microtile_avx2<SUBBLK, HAS_MIN, BIAS, 0, ACTBIAS, 8>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
+            }
+            return;
+        }
+    }
     if (standard) {
         tiled_run_microtile_avx2<SUBBLK, HAS_MIN, BIAS, 1, ACTBIAS>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
     } else {
@@ -537,25 +565,25 @@ void tiled_run_microtile(const tiled_tile_src0 & src0, const tiled_tile_src1 & s
 // ACTBIAS selects the act-bias MAC (Wmax <= 64); iq4_xs (Wmax 127) keeps the sign trick
 // q4_K / q5_K: BIAS = 0
  template void tiled_run_microtile<32, true, 0, false>(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
-                                               int i0, int j0, int num_k, int slab, float * buf, int buf_stride);
+                                               int i0, int j0, int num_k, int slab, float * buf, int buf_stride, int n_cols);
 // iq4_xs: sign trick (Wmax 127 overflows act-bias)
 template void tiled_run_microtile<32, false, 128, false>(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
-                                                  int i0, int j0, int num_k, int slab, float * buf, int buf_stride);
+                                                  int i0, int j0, int num_k, int slab, float * buf, int buf_stride, int n_cols);
 // iq2_xxs, iq3_xxs, iq3_s, iq1_s: act-bias (Wmax <= 62)
 template void tiled_run_microtile<32, false, 128, true>(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
-                                                  int i0, int j0, int num_k, int slab, float * buf, int buf_stride);
+                                                  int i0, int j0, int num_k, int slab, float * buf, int buf_stride, int n_cols);
 // iq2_xs, iq2_s, iq1_m: act-bias
 template void tiled_run_microtile<16, false, 128, true>(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
-                                                  int i0, int j0, int num_k, int slab, float * buf, int buf_stride);
+                                                  int i0, int j0, int num_k, int slab, float * buf, int buf_stride, int n_cols);
 // q6_K: act-bias (Wmax 32)
 template void tiled_run_microtile<16, false, 32, true>(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
-                                                 int i0, int j0, int num_k, int slab, float * buf, int buf_stride);
+                                                 int i0, int j0, int num_k, int slab, float * buf, int buf_stride, int n_cols);
 // q3_K: act-bias (Wmax 4)
 template void tiled_run_microtile<16, false, 4, true>(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
-                                                int i0, int j0, int num_k, int slab, float * buf, int buf_stride);
+                                                int i0, int j0, int num_k, int slab, float * buf, int buf_stride, int n_cols);
 // q2_K: BIAS = 0
 template void tiled_run_microtile<16, true, 0, false>(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
-                                               int i0, int j0, int num_k, int slab, float * buf, int buf_stride);
+                                               int i0, int j0, int num_k, int slab, float * buf, int buf_stride, int n_cols);
 
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))

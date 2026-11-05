@@ -786,6 +786,12 @@ static void tiled_mmid_gemm_window(struct ggml_tensor * dst, const struct ggml_t
     // narrow path (small nrows): we're memory bound in this case so do longer, skinny tiled in order
     // to have contiguous reads and improve memory bandwidth
     if (nrows <= TILED_MICRO) {
+        bool prepare_bias = ACTBIAS;
+#if defined(__AVXVNNIINT8__) && !(defined(__AVX512VNNI__) && defined(__AVX512VL__) && defined(__AVX512DQ__))
+        if constexpr (SUBBLK == 16 && !HAS_MIN && BIAS == 32 && ACTBIAS) {
+            prepare_bias = nrows != 8;
+        }
+#endif
         const int k_extent = ggml_tiled_narrow_k_extent(nrows, ne00);
         const int num_k = k_extent / TILED_TILE_K;
         for (int64_t k0 = 0; k0 < ne00; k0 += k_extent) {
@@ -794,17 +800,17 @@ static void tiled_mmid_gemm_window(struct ggml_tensor * dst, const struct ggml_t
             // slabs) so each activation row is a long stream, then repack each slab in place
             tiled_unpack_src1_q8_K(rows, nrows, &ws->src1, kstart, num_k);
             // repack the whole k_extent chunk in place: num_k slabs x 4 tiles, 16 rows, row stride num_k*256
-            tiled_repack_src1(&ws->src1, 0, num_k, ACTBIAS);
+            tiled_repack_src1(&ws->src1, 0, num_k, prepare_bias);
             // weight groups (16 at a time): unpack the k_extent chunk of the group (the long per-row
             // read), then one standard MAC per slab accumulating into the same acc rows
             for (int64_t ir0 = r; ir0 < r_end; ir0 += TILED_MICRO) {
                 const int n0 = (int) MIN(TILED_MICRO, r_end - ir0);
                 const B * wbase = (const B *) (src0_cur + ir0 * src0->nb[1] + kstart * src0_bs);
                 tiled_unpack_src0(wbase, src0_stride, n0, &ws->src0, num_k);
-                tiled_repack_src0<SUBBLK>(&ws->src0, n0, num_k, BIAS, ACTBIAS);
+                tiled_repack_src0<SUBBLK>(&ws->src0, n0, num_k, BIAS, prepare_bias);
                 float * buf = ws->acc + (ir0 - r) * TILED_TILE_ROWS;
                 for (int slab = 0; slab < num_k; slab++) {
-                    tiled_run_microtile<SUBBLK, HAS_MIN, BIAS, ACTBIAS>(ws->src0, ws->src1, 0, 0, num_k, slab, buf, TILED_TILE_ROWS);
+                    tiled_run_microtile<SUBBLK, HAS_MIN, BIAS, ACTBIAS>(ws->src0, ws->src1, 0, 0, num_k, slab, buf, TILED_TILE_ROWS, (int) nrows);
                 }
             }
         }
@@ -973,6 +979,12 @@ static void ggml_compute_forward_mul_mat_tiled_one_chunk(
             memset(ws->acc, 0, (size_t)TILED_TILE_ROWS * TILED_TILE_ROWS * sizeof(float));
 
             if (n_src1 <= TILED_MICRO) {
+                bool prepare_bias = ACTBIAS;
+#if defined(__AVXVNNIINT8__) && !(defined(__AVX512VNNI__) && defined(__AVX512VL__) && defined(__AVX512DQ__))
+                if constexpr (SUBBLK == 16 && !HAS_MIN && BIAS == 32 && ACTBIAS) {
+                    prepare_bias = n_src1 != 8;
+                }
+#endif
                 // narrow path: if we have few enough rows, we're memory bound
                 // Do longer, skinner tiles so we have longer contiguous reads and improve bandwidth
                 const int k_extent = ggml_tiled_narrow_k_extent(n_src1, ne00);
@@ -983,17 +995,17 @@ static void ggml_compute_forward_mul_mat_tiled_one_chunk(
                     // (all slabs) so each activation row is a long stream, then repack each slab in place
                     tiled_unpack_src1_q8_K(rows, n_src1, &ws->src1, kstart, num_k);
                     // repack the whole k_extent chunk in place, if kernel wants to: num_k slabs x 4 tiles, 16 rows, row stride num_k*256
-                    tiled_repack_src1(&ws->src1, 0, num_k, ACTBIAS);
+                    tiled_repack_src1(&ws->src1, 0, num_k, prepare_bias);
                     // weight groups: unpack the k_extent chunk of each 16-row group (the long per-row
                     // read), then one standard MAC per slab accumulating into the same acc rows
                     for (int64_t ir0 = iir0; ir0 < iir0_end; ir0 += MICRO) {
                         const int n0 = (int) MIN(MICRO, iir0_end - ir0);
                         const B * wbase = (const B *) (src0_row + ir0 * nb01 + kstart * src0_bs);
                         tiled_unpack_src0(wbase, src0_stride, n0, &ws->src0, num_k);
-                        tiled_repack_src0<SUBBLK>(&ws->src0, n0, num_k, BIAS, ACTBIAS);
+                        tiled_repack_src0<SUBBLK>(&ws->src0, n0, num_k, BIAS, prepare_bias);
                         float * buf = ws->acc + (ir0 - iir0) * TILED_TILE_ROWS;
                         for (int slab = 0; slab < num_k; slab++) {
-                            tiled_run_microtile<SUBBLK, HAS_MIN, BIAS, ACTBIAS>(ws->src0, ws->src1, 0, 0, num_k, slab, buf, TILED_TILE_ROWS);
+                            tiled_run_microtile<SUBBLK, HAS_MIN, BIAS, ACTBIAS>(ws->src0, ws->src1, 0, 0, num_k, slab, buf, TILED_TILE_ROWS, n_src1);
                         }
                     }
                 }
