@@ -775,7 +775,8 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
     std::vector<llama_token_data> residual;
 
     std::vector<llama_token_data> cand; // candidate array masked by the grammar, if there is one
-    std::vector<float> q_by_id(llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx))));
+    const size_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx)));
+    std::vector<float> q_by_id;
 
     size_t i = 0;
     for (; i < draft.size(); i++) {
@@ -785,12 +786,24 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
         const auto * cur_p = common_sampler_get_candidates(gsmpl, true);
         const auto & q     = draft_q[i];
 
-        std::fill(q_by_id.begin(), q_by_id.end(), 0.0f);
-        for (const auto & token : q) {
-            if (token.id >= 0 && (size_t) token.id < q_by_id.size()) {
-                q_by_id[token.id] = token.p;
+        // Full-vocabulary drafts can retain token-id order and need no scatter buffer.
+        bool q_by_token = q.size() == n_vocab;
+        if (q_by_token) {
+            for (size_t k = 0; k < q.size(); ++k) {
+                q_by_token &= q[k].id == (llama_token) k;
             }
         }
+        if (!q_by_token) {
+            q_by_id.assign(n_vocab, 0.0f);
+            for (const auto & token : q) {
+                if (token.id >= 0 && (size_t) token.id < n_vocab) {
+                    q_by_id[token.id] = token.p;
+                }
+            }
+        }
+        auto q_of = [&](llama_token id) {
+            return q_by_token ? q[id].p : q_by_id[id];
+        };
 
         const bool masked = !grammar_first && grammar_should_apply(gsmpl);
         if (masked) {
@@ -819,7 +832,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
         };
 
         // q_x is never 0 for a token the draft produced, but guard the divide
-        const float q_x = draft[i] >= 0 && (size_t) draft[i] < q_by_id.size() ? q_by_id[draft[i]] : 0.0f;
+        const float q_x = draft[i] >= 0 && (size_t) draft[i] < n_vocab ? q_of(draft[i]) : 0.0f;
 
         float p_x = 0.0f;
         for (size_t k = 0; k < cur_p->size; ++k) {
@@ -839,7 +852,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
         residual.clear();
         float sum = 0.0f;
         for (size_t k = 0; k < cur_p->size; ++k) {
-            const float r = p_of(k) - q_by_id[cur_p->data[k].id];
+            const float r = p_of(k) - q_of(cur_p->data[k].id);
             if (r > 0.0f) {
                 residual.push_back({ cur_p->data[k].id, 0.0f, r });
                 sum += r;

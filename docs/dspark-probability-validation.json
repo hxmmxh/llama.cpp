@@ -1,0 +1,49 @@
+{
+  "date": "2026-11-05",
+  "status": "passed",
+  "repository_head": "93fda82226533c26f4ae0bf24a7d03e0cef88309",
+  "uncommitted": true,
+  "published": false,
+  "scope": "Local macOS native CPU correctness integration; no performance claim or Windows tests.",
+  "source_files": {
+    "common/CMakeLists.txt": "9ab0a087cf62c6e4d50892970d92b169adba5df6872ee5e91ffe8e7f342b82a1",
+    "common/sampling.cpp": "8ee4ccd1b0a428f296d1937594206ef2374b07b1edc2ea5f7925c658def2e485",
+    "src/llama-sampler.cpp": "7ad07d4b7563a858bd586e82b12a494c5df69f6e2fd781c72c8d538d18630554",
+    "tools/server/server-context.cpp": "4d83c953786ba0d5d72f9f2b9acb12b32849fd5b9d67c3e75d7deb1c7370d5b5",
+    "tests/CMakeLists.txt": "65ca1633cac66f0431cadb4f81112b3b9f989516122cc05eefedd7e254439bf0",
+    "common/speculative.cpp": "8e2846e61d05e490fe180f59e4e8def51607a684198a67e86d90e69f13baff23",
+    "common/speculative-dspark.h": "9aa711c66fe802e391fdfe90f488bc541ae314c92df883aaa5c6dea0c557b59e",
+    "tests/test-speculative-dspark.cpp": "4a8bb9e3534dfa75bacba530c7ab05050e7e79f33c643caf79457036e43e9dd0"
+  },
+  "preserved_loader_sha256": "7e1fcff2745a3c28977ccaca15a5e9e267034799ccfc9e82106416beaa76deee",
+  "build_directory": "build-dspark-prob-cpu",
+  "build_outputs": {
+    "bin/llama-cli": "020ec2f1f3cf2a472025f72324ed77931c2699c0de0a0bb95df1cdcfe2b51c27",
+    "bin/libllama.0.7.0.dylib": "d79d607a3471350d8585f174ea133c99ac6bb11813fb54f0328e879a1a9907cb",
+    "bin/libmtmd.0.7.0.dylib": "095105e67ee3b778e0943e17eccb786ce3e5344b53db980675d4a8b6a23fbde9",
+    "bin/libllama-common.0.7.0.dylib": "4c3d933f1e21c5310ba621487db4940ebd952517725eb4bc8a2b925d06d2ccc3",
+    "bin/libggml-cpu.0.27.0.dylib": "aed004eecb1dc9ab52fe5c0643d899cd13b802aabfe84e824e68e057dee8aa72",
+    "bin/libggml.0.27.0.dylib": "e906c0baa7ec05016b600aa328d44beafbc5e3ab88559c8b90c3c86a8fb311c7",
+    "bin/libllama-server-impl.dylib": "ebf797d5a584ad5701b84b2da993c163c4f26af901c938cf547d5a0d4e76647f",
+    "bin/test-sampling": "5d898d0cf261a37137499de032fd1a07748580a497143b2861f7985277e2ded0",
+    "bin/libggml-base.0.27.0.dylib": "4f647372ed20fde5e362a502c3180d5a744f5e0c7d2b4e8e1a3d6459ccf58d68",
+    "bin/test-speculative-rejection-sampling": "7f16b40b12c13cc41532cd92ab2d8d8d14cc004691427c9fa94e2cb7ad98565e",
+    "bin/libllama-cli-impl.dylib": "25538892e6224e17e8cdb402c5a33f14adbd79d79904aa6f2d2f788a053f1cd6",
+    "bin/llama-server": "ededef3c6e9e514ad75323d74b9b20494201c35c295788b7693e999d327f7e9d",
+    "bin/test-llama-archs": "f4e77fca172370bc02d0f750a508135cc350471c7acd924b6c5cd3d5eccc8660",
+    "bin/test-speculative-dspark": "252d8320e99cbe85f1d9e3433b1ad8fb9bb3024265fe696f50a373bd7fe45e34"
+  },
+  "ctest_entries_passed": 4,
+  "model_requests": 5,
+  "output_tokens_and_acceptance_counts_equal": true,
+  "ordinary_model_requests": 0,
+  "server_exit_code": 0,
+  "loaded_libraries": {
+    "/Users/xmhuang6/workspace/mlx_infer/cpu_infer/llama_cpp_xmhuang6/build-dspark-prob-cpu/bin/libggml-cpu.0.27.0.dylib": "aed004eecb1dc9ab52fe5c0643d899cd13b802aabfe84e824e68e057dee8aa72",
+    "/Users/xmhuang6/workspace/mlx_infer/cpu_infer/llama_cpp_xmhuang6/build-dspark-prob-cpu/bin/libllama.0.7.0.dylib": "d79d607a3471350d8585f174ea133c99ac6bb11813fb54f0328e879a1a9907cb",
+    "/Users/xmhuang6/workspace/mlx_infer/cpu_infer/llama_cpp_xmhuang6/build-dspark-prob-cpu/bin/libllama-common.0.7.0.dylib": "4c3d933f1e21c5310ba621487db4940ebd952517725eb4bc8a2b925d06d2ccc3",
+    "/Users/xmhuang6/workspace/mlx_infer/cpu_infer/llama_cpp_xmhuang6/build-dspark-prob-cpu/bin/libllama-server-impl.dylib": "ebf797d5a584ad5701b84b2da993c163c4f26af901c938cf547d5a0d4e76647f"
+  },
+  "experiment_report": "../../experiments/dpsark_optimizer/port-xmhuang6-prob-20261105/REPORT.md",
+  "reference": "../../experiments/dpsark_optimizer/prob-w1-cache-20261105/results/combined-runs.json"
+}

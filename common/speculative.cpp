@@ -9,6 +9,7 @@
 #include "ngram-map.h"
 #include "ngram-mod.h"
 #include "sampling.h"
+#include "speculative-dspark.h"
 
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
 
@@ -1029,20 +1030,17 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     int32_t dspark_markov_rank = 0;
     int32_t dspark_markov_vocab = 0;
     std::vector<float> dspark_markov_w1;
-    std::vector<float> dspark_markov_w2;
+    std::unique_ptr<common_speculative_dspark_markov> dspark_markov;
 
-    void add_dspark_markov_bias(std::vector<float> & logits, llama_token prev) const {
+    void add_dspark_markov_bias(std::vector<float> & logits, llama_token prev) {
         GGML_ASSERT(dspark_probabilistic);
         GGML_ASSERT(prev >= 0 && prev < dspark_markov_vocab);
-        const float * w1 = dspark_markov_w1.data() + (size_t) prev * dspark_markov_rank;
-        for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
-            const float * w2 = dspark_markov_w2.data() + (size_t) token * dspark_markov_rank;
-            float bias = 0.0f;
-            for (int32_t r = 0; r < dspark_markov_rank; ++r) {
-                bias += w2[r] * w1[r];
-            }
-            logits[token] += bias;
+        if (dspark_markov->w1_cache_bytes() != 0) {
+            dspark_markov->apply_token(logits.data(), prev);
+            return;
         }
+        const float * w1 = dspark_markov_w1.data() + (size_t) prev * dspark_markov_rank;
+        dspark_markov->apply(logits.data(), w1);
     }
 
     // block-internal attention
@@ -1082,9 +1080,20 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             }
             dspark_markov_vocab = n_vocab;
             dspark_markov_w1.resize(n_w1);
-            dspark_markov_w2.resize(n_w2);
+            std::vector<float> dspark_markov_w2(n_w2);
             llama_model_get_dspark_markov_w1(model_dft, dspark_markov_w1.data());
             llama_model_get_dspark_markov_w2(model_dft, dspark_markov_w2.data());
+            auto cpu = this->params.cpuparams;
+            cpu.n_threads = llama_n_threads(ctx_dft);
+            dspark_markov.reset(new common_speculative_dspark_markov(
+                dspark_markov_w2, dspark_markov_rank, dspark_markov_vocab, cpu, &dspark_markov_w1));
+            if (dspark_markov->w1_cache_bytes() != 0) {
+                std::vector<float>().swap(dspark_markov_w1);
+                LOG_INF("%s: probabilistic DSpark W1 cache: Q8_0, %zu bytes, F32 capacity %zu\n", __func__,
+                        dspark_markov->w1_cache_bytes(), dspark_markov_w1.capacity());
+            }
+            LOG_INF("%s: probabilistic DSpark Markov W2 path: %s\n", __func__,
+                    dspark_markov->uses_integer_dot() ? "Q8_0 integer dot" : "FP32 fallback");
             llama_set_dspark_probabilistic(ctx_dft, true);
             LOG_INF("%s: probabilistic DSpark uses CPU sampling and Markov weights, backend sampling disabled\n", __func__);
         }

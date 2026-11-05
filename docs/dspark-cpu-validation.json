@@ -1,0 +1,138 @@
+{
+  "date": "2026-11-04",
+  "platform": "Apple M5 Pro / macOS / native ARM64 CPU",
+  "base_commit": "7a9121b511b6be28f0c6ac35334f9ca45fd1efad",
+  "scope": "Source integration correctness; no new throughput measurement, Windows test, commit or deployment",
+  "build": {
+    "directory": "build-dspark-cpu",
+    "targets": [
+      "llama-server",
+      "llama-cli",
+      "llama-quantize",
+      "test-backend-ops",
+      "test-quantize-fns"
+    ],
+    "type": "Release",
+    "metal": false,
+    "blas": false,
+    "accelerate": false,
+    "openmp": false,
+    "max_compile_jobs": 2
+  },
+  "source_sha256": {
+    "ggml/src/ggml-cpu/arch/arm/repack.cpp": "c16a6ce3cc48081755163f81089cf9eabddf0b3b89278f56d260fb7c0f83d2b3",
+    "ggml/src/ggml-cpu/ggml-cpu.c": "c4caaaf27e0768c0b34dd009c4073e5e3fca511bb99b68babf48781c8860e271",
+    "ggml/src/ggml-cpu/ops.cpp": "2462dd2c40681d07c01fd73cdbe3b42f87ef7493b052c8fe7fcd124e1fdbf385",
+    "ggml/src/ggml-cpu/repack.cpp": "9cc3a4560e1abcd81059452f6b21611aee76af551d07347c150f287f35ace0a9",
+    "ggml/src/ggml-cpu/vec.cpp": "203dc33ae4f1aece3fa7696132fb81ea6bbedf0d7ccaeee1ccb26546e06ce186",
+    "src/models/dflash.cpp": "f5292a98c5b92b35e8581d6727c6dc91490ab5fcc0dfe4fac4c053dd6a1d02d9",
+    "tests/test-backend-ops.cpp": "ed60da97bda41385cd5150557d0d719865f1edf7a87e27af1e283780a0501a42",
+    "ggml/src/ggml-cpu/arch/arm/tail3-q4.inc": "2cffe0a7a001202bb67cc141d50cbd6f00169d68b0833ec375f10383a6d9227d",
+    "ggml/src/ggml-cpu/arch/arm/tail3-q6.inc": "dae00479b7940cd5d6408ccd892d23a3303f69444974e0e0b881f35db4a94393"
+  },
+  "runtime_sha256": {
+    "libllama.0.7.0.dylib": "e3da5d7b667eb4132644310c1099cf86207e3afe1c0d528bd0d68277447c120a",
+    "libmtmd.0.7.0.dylib": "f97b55582577d7dde781968e8acedfa25170cb1bb1a07ea28c4c4ec29ea27b46",
+    "libllama-common.0.7.0.dylib": "17fe58833a1f8a123b9ff440a9daa1c9c27c45cadfc67ddd39c9074df96a0f7d",
+    "libggml.0.27.0.dylib": "2ba08dac611234d5a6f80c5b6eb0d3705747abd46e1e85cc9a1f9c88c604e3bf",
+    "libggml-cpu.0.27.0.dylib": "f0b42b3e2e0a6172aaf00486b09e9495f8fbda45cf02cf25694d6e5511d2167b",
+    "libllama-server-impl.dylib": "a49141205da50cbe2d5e99e9da6e4388a0ef22ef451ceba5b608f3d4e513d8f1",
+    "libggml-base.0.27.0.dylib": "b3b5d061150056badf534a2d74e7cb3ab504806738b77e14462c4bf9ae3fff7c",
+    "libllama-quantize-impl.dylib": "0da6ee7c8fb4ab37d10b8f898a0d36635161e4154dd61f729f9c213551aa68b7",
+    "libllama-cli-impl.dylib": "b01eec5d345743730714891ee9c9d5ed8d431bb90874a4430a0cd7e1a05ec0ea"
+  },
+  "models": [
+    {
+      "name": "Spark-X2.6-4B-Q4_K_M.gguf",
+      "bytes": 3543441312,
+      "sha256": "91cb2811aebb47ac916aa619d27d4cdd7f4143106b7917accb8ead4cd7f5cbd9"
+    },
+    {
+      "name": "Spark-X2.6-4B-DSpark-Q4_K_M-targetmix.gguf",
+      "bytes": 486293792,
+      "sha256": "3ad60e51f1f17578b0c8c5c4bfd9ef01b6bed2527a6b97f3de4eaca261808e82"
+    }
+  ],
+  "checks": {
+    "backend_cases": {
+      "argmax-backend": 23,
+      "matmul-backend": 113,
+      "geglu": 84,
+      "attention": 79
+    },
+    "quantization_suite_failed": 0,
+    "argmax_oracle": {
+      "synthetic_rows": 6600,
+      "real_logits_rows": 2200,
+      "threads": [
+        1,
+        2,
+        3,
+        8,
+        16
+      ]
+    },
+    "repack": {
+      "q4-q6": {
+        "bytes": 8432592,
+        "sha256": "227195edda0a6c35bc922477370602e070f17d49d285adaf5fa2974ce170fd86",
+        "bitwise_equal": true
+      },
+      "q5": {
+        "bytes": 554400,
+        "sha256": "9400f874377bdb008ff5de5a272e666cdf121a677df4a372b8aa6bdbcc45c99e",
+        "bitwise_equal": true
+      }
+    },
+    "target_logits": [
+      {
+        "prompt": "chinese",
+        "floats": 4194304,
+        "bitwise_equal": true,
+        "sha256": "ef532b2dda2719069928d3da039ec25c6cdf738019a476b7e745198dde2e0126"
+      },
+      {
+        "prompt": "python",
+        "floats": 4194304,
+        "bitwise_equal": true,
+        "sha256": "d46a2728187fce373c2d330dde7f9c4593b94f6be50a8884e35a6b11dbbce417"
+      },
+      {
+        "prompt": "english",
+        "floats": 4194304,
+        "bitwise_equal": true,
+        "sha256": "3ae61e264b47a311481b115f630b71869c4269f2caf484499cdbbb982d97315c"
+      }
+    ],
+    "dspark_requests": [
+      {
+        "prompt": "chinese",
+        "tokens": 96,
+        "same_tokens": true,
+        "same_acceptance": true
+      },
+      {
+        "prompt": "python",
+        "tokens": 96,
+        "same_tokens": true,
+        "same_acceptance": true
+      },
+      {
+        "prompt": "english",
+        "tokens": 96,
+        "same_tokens": true,
+        "same_acceptance": true
+      }
+    ],
+    "server_exit_code": 0
+  },
+  "raw_artifacts": "build-dspark-cpu/validation",
+  "raw_artifact_sha256": {
+    "validate_port.py": "e14a298f3dabdfe83b0370119e4802369c749ae24d0677069dac77eb480bb18f",
+    "protocol.json": "cacc11c247779ac799e01ede8eb0e7cfd9f022a88655c2b99e880fbb1542c90d",
+    "summary.json": "2b71e7ec133d863e50681804fac364ecf0614454b34b1eef0aedf828cec65e7a",
+    "configure.log": "a36ea4a21de753f72d9117b21c61e9604bd25dffc6ebec83bcce86d3afeb171e",
+    "build.log": "bea97481d712d1c56aa3c104aa51c7085c23e573b35a1cdae699a7cf25984353",
+    "rebuild.log": "3475902ca3d1b30d6883a91bdecaea88b4b2b508b7ddf1fa96a116eadabb7ea5"
+  }
+}

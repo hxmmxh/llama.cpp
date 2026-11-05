@@ -2,6 +2,8 @@
 
 `cpu_opt` is the CPU inference optimization branch, starting from `22c0ae1871b60123c5afc008a78fe9c6fffa2858`. Each optimization is kept in a separate commit with its tests and validation notes.
 
+The local DSpark integration after `7a9121b51` is documented in [DSpark CPU optimizations](dspark-cpu.md), including the runtime changes, mixed-quantization recipe, build/run commands and validation boundaries.
+
 **GQA four-head decode and scheduling**
 
 The first change ports the independently tested GQA4 attention patch from `a34de8618b25dfc32ee43749db47d767a9f0a25d`. Its workspace source is `cpu_infer/op_optimizer/gqa4_attention/patches/gqa4-attention.patch`.
@@ -133,3 +135,8 @@ Regression commands:
 ./build/bin/test-backend-ops -b CPU -o MUL_MAT \
   -p '^type_a=q[2-6]_K,type_b=f32,m=16,n=[1-9],k=(256|4096),bs=\[1,1\],nr=\[1,1\],'
 ```
+
+
+**x64 Q8 multirow signed dot (2026-11-05)**
+
+[Validation and scope](q8-multirow-20261105.md): the AVX-VNNI-INT8 tinyBLAS path removes sign conversions. Fixed-history logits and eight seeded DSpark outputs/acceptance counts match the frozen release. Historical comparison observes M8 cost down about 9%, draft cost down 18.2%, and generation throughput up 8.3%; ordinary generation remains ahead. The alternative 2x4 tile is not integrated.

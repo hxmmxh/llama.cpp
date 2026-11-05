@@ -1,0 +1,201 @@
+{
+  "date": "2026-11-04",
+  "scope": "M5 Pro local CPU, three short prompts, Q8 candidate only",
+  "model": {
+    "name": "Spark-X2.6-4B-DSpark-Q8_0-backbone.gguf",
+    "bytes": 700596512,
+    "sha256": "360bb19f510d7be4171fc4de3657b1000f85f2cf081da37425e67f181b88fd66",
+    "tensor_types": {
+      "f32": 14,
+      "bf16": 7,
+      "q8_0": 37
+    }
+  },
+  "mixed_model_bytes": 486293792,
+  "model_size_growth_pct": 44.06856997261441,
+  "result": {
+    "rows": [
+      {
+        "prompt": "chinese",
+        "q8_tps": 29.518833689130222,
+        "historical_mixed_tps": 31.70686039669621,
+        "historical_ratio": 0.9309920099249569,
+        "samples": 9,
+        "draft_ms_per_round": 12.749823529411765,
+        "draft_rounds": 459,
+        "proposed": 3051,
+        "accepted": 387,
+        "acceptance_rate": 0.12684365781710916,
+        "effective_tokens_per_round": 1.8627450980392157,
+        "mean_request_wall_seconds": 3.425668148111097,
+        "same_tokens_as_mixed": true,
+        "same_tokens_as_ordinary": false,
+        "repeat_stable": true,
+        "input_tokens": [
+          34
+        ]
+      },
+      {
+        "prompt": "python",
+        "q8_tps": 79.26588847651055,
+        "historical_mixed_tps": 83.32193138482805,
+        "historical_ratio": 0.9513208246507827,
+        "samples": 9,
+        "draft_ms_per_round": 12.91600617283951,
+        "draft_rounds": 162,
+        "proposed": 1098,
+        "accepted": 693,
+        "acceptance_rate": 0.6311475409836066,
+        "effective_tokens_per_round": 5.277777777777778,
+        "mean_request_wall_seconds": 1.4190669722222031,
+        "same_tokens_as_mixed": true,
+        "same_tokens_as_ordinary": true,
+        "repeat_stable": true,
+        "input_tokens": [
+          35
+        ]
+      },
+      {
+        "prompt": "english",
+        "q8_tps": 35.37892190866429,
+        "historical_mixed_tps": 36.226426606213025,
+        "historical_ratio": 0.9766053465123335,
+        "samples": 9,
+        "draft_ms_per_round": 13.148566395663956,
+        "draft_rounds": 369,
+        "proposed": 2583,
+        "accepted": 486,
+        "acceptance_rate": 0.18815331010452963,
+        "effective_tokens_per_round": 2.317073170731707,
+        "mean_request_wall_seconds": 2.9434582776666502,
+        "same_tokens_as_mixed": true,
+        "same_tokens_as_ordinary": true,
+        "repeat_stable": true,
+        "input_tokens": [
+          44
+        ]
+      }
+    ],
+    "aggregate_q8_tps": 40.12955855357864,
+    "historical_mixed_tps": 42.167573047552594,
+    "draft_ms_per_round": 12.925639393939392,
+    "acceptance_rate": 0.232620320855615,
+    "formal_requests": 27,
+    "process_tps": [
+      39.809751293816916,
+      40.1810751929373,
+      40.40232588865743
+    ],
+    "candidate_first_to_last_change_pct": 1.4885161941027958,
+    "reference_limit": "Historical same-binary mixed draft records are correctness runs, one request per prompt and no dedicated warmup. Cross-round descriptive reference, not a paired speedup measurement."
+  },
+  "actual_output_tokens": 2592,
+  "baseline_execution": {
+    "enabled": false,
+    "mode": "reuse_existing",
+    "paths": [
+      "/Users/xmhuang6/workspace/mlx_infer/cpu_infer/llama_cpp_xmhuang6/build-dspark-cpu/validation/model-chinese.json",
+      "/Users/xmhuang6/workspace/mlx_infer/cpu_infer/llama_cpp_xmhuang6/build-dspark-cpu/validation/model-python.json",
+      "/Users/xmhuang6/workspace/mlx_infer/cpu_infer/llama_cpp_xmhuang6/build-dspark-cpu/validation/model-english.json"
+    ]
+  },
+  "mixed_reference_acceptance": {
+    "chinese": {
+      "proposed": 327,
+      "accepted": 45
+    },
+    "python": {
+      "proposed": 122,
+      "accepted": 77
+    },
+    "english": {
+      "proposed": 294,
+      "accepted": 52
+    }
+  },
+  "source_base_commit": "7a9121b511b6be28f0c6ac35334f9ca45fd1efad",
+  "source_sha256": {
+    "ggml/src/ggml-cpu/arch/arm/repack.cpp": "c16a6ce3cc48081755163f81089cf9eabddf0b3b89278f56d260fb7c0f83d2b3",
+    "ggml/src/ggml-cpu/ggml-cpu.c": "c4caaaf27e0768c0b34dd009c4073e5e3fca511bb99b68babf48781c8860e271",
+    "ggml/src/ggml-cpu/ops.cpp": "2462dd2c40681d07c01fd73cdbe3b42f87ef7493b052c8fe7fcd124e1fdbf385",
+    "ggml/src/ggml-cpu/repack.cpp": "9cc3a4560e1abcd81059452f6b21611aee76af551d07347c150f287f35ace0a9",
+    "ggml/src/ggml-cpu/vec.cpp": "203dc33ae4f1aece3fa7696132fb81ea6bbedf0d7ccaeee1ccb26546e06ce186",
+    "src/models/dflash.cpp": "f5292a98c5b92b35e8581d6727c6dc91490ab5fcc0dfe4fac4c053dd6a1d02d9",
+    "tests/test-backend-ops.cpp": "ed60da97bda41385cd5150557d0d719865f1edf7a87e27af1e283780a0501a42",
+    "ggml/src/ggml-cpu/arch/arm/tail3-q4.inc": "2cffe0a7a001202bb67cc141d50cbd6f00169d68b0833ec375f10383a6d9227d",
+    "ggml/src/ggml-cpu/arch/arm/tail3-q6.inc": "dae00479b7940cd5d6408ccd892d23a3303f69444974e0e0b881f35db4a94393"
+  },
+  "runtime_sha256": {
+    "libllama.0.7.0.dylib": "e3da5d7b667eb4132644310c1099cf86207e3afe1c0d528bd0d68277447c120a",
+    "libmtmd.0.7.0.dylib": "f97b55582577d7dde781968e8acedfa25170cb1bb1a07ea28c4c4ec29ea27b46",
+    "libllama-common.0.7.0.dylib": "17fe58833a1f8a123b9ff440a9daa1c9c27c45cadfc67ddd39c9074df96a0f7d",
+    "libggml.0.27.0.dylib": "2ba08dac611234d5a6f80c5b6eb0d3705747abd46e1e85cc9a1f9c88c604e3bf",
+    "libggml-cpu.0.27.0.dylib": "f0b42b3e2e0a6172aaf00486b09e9495f8fbda45cf02cf25694d6e5511d2167b",
+    "libllama-server-impl.dylib": "a49141205da50cbe2d5e99e9da6e4388a0ef22ef451ceba5b608f3d4e513d8f1",
+    "libggml-base.0.27.0.dylib": "b3b5d061150056badf534a2d74e7cb3ab504806738b77e14462c4bf9ae3fff7c",
+    "libllama-quantize-impl.dylib": "0da6ee7c8fb4ab37d10b8f898a0d36635161e4154dd61f729f9c213551aa68b7",
+    "libllama-cli-impl.dylib": "b01eec5d345743730714891ee9c9d5ed8d431bb90874a4430a0cd7e1a05ec0ea"
+  },
+  "raw_artifacts": "build-dspark-cpu/q8-draft-20261104",
+  "peak_process_memory": null,
+  "ttft": null,
+  "raw_sha256": {
+    "measure_q8.py": "6c0092d88c735f493a726b6c292d438c16182bb66c1be798ffeb3f581d920506",
+    "measurement/completed.json": "99f7f4d54402b0035433aa10ee887e3b02e575678a8125b4ea146e13994fd5fc",
+    "measurement/prompts.json": "a3d7860eb0b51bb745a2e5c9b5348735ff7eddaacd63296af3ed0dff569d7ede",
+    "measurement/protocol.json": "87a09bc9c6c6465bec83af0ad5624c3fb107f7f5805b20f228d653b6895fe47d",
+    "measurement/q8-0-0-chinese.json": "b185d52f9bcee6d75872b730b17491dbe4319c8df146bca99a03c0081a1082ca",
+    "measurement/q8-0-0-english.json": "e474a109a94bdfbb80231e2504c3a7da3388ec34d926e58fc2a22a08eae9635e",
+    "measurement/q8-0-0-python.json": "5a41a56e16e6a074c00be338c2df9a719198ccde857aac6437d0bcc0e2403693",
+    "measurement/q8-0-1-chinese.json": "5d8484fa3086a1fd757f6efdfaf6ba78937b2d65c8967486d9292a184ef19a07",
+    "measurement/q8-0-1-english.json": "bce8a7cc331695614cd9e0a20ccaa508f184ecc6733506ef5a5090f78683ef6e",
+    "measurement/q8-0-1-python.json": "cef2f08d0723fc4a749a7e3b1c36a518303ad58a11cd08c18063f7c7372a5beb",
+    "measurement/q8-0-2-chinese.json": "baf64aca3205b2f6ff761b974645a38d17c26591cf4cc911708836a4526d9fc6",
+    "measurement/q8-0-2-english.json": "55edd078912ee5d9fc451f82e0c4fb273705eac94498ab66fba30aac5be5f418",
+    "measurement/q8-0-2-python.json": "9c9fdccea970ec61e25eed5d239fb0413fecb661b1b06744bf9930c442916965",
+    "measurement/q8-0-process.json": "6fd28ac735b2ac8710e39f7fdff02abb5ad1830944a886da1c1b48c4e117589d",
+    "measurement/q8-0-server.log": "c33023aa08c56070ab316ee9ec92e8e1f1d7834aa24f3fad3f07bae0f78966b8",
+    "measurement/q8-0-warmup.json": "4e277669d43ee8d050debfa2fdf6f4e8faf853506fe9300ffade0fbd605209f2",
+    "measurement/q8-1-0-chinese.json": "f7ab9874340d93dcf84a8f696234aa08178a74997fcc6acf4a64322fb34f474c",
+    "measurement/q8-1-0-english.json": "4955b0de9c2c12b246be6a061967c07937a28abf94263b804537425b8434e93f",
+    "measurement/q8-1-0-python.json": "07f914cdacde0b83985a0e332fe2d19220433d8877fdbc68cf6835d68d5cc51e",
+    "measurement/q8-1-1-chinese.json": "a8dcae2a3941455c445db011ebf342f21ce075905fcb1c5524b0e03a547b9603",
+    "measurement/q8-1-1-english.json": "e4be8233d2e12121a2b6bcaab5a9d7d306b854fc1db2df562e1334325722790e",
+    "measurement/q8-1-1-python.json": "1fd01a7df7af62c516adccfb7696f7b9dbfca30bd9e6d0dc5cc9c6aa76f4eb83",
+    "measurement/q8-1-2-chinese.json": "73e5833e311552dc71134886bbfc65fb482331809da714b82a8a2c5e055ad841",
+    "measurement/q8-1-2-english.json": "ccf294210106dd6cdbbf9bbf785beaac533d95067d406ad908e5bc1cd897002d",
+    "measurement/q8-1-2-python.json": "5a0455e962f63917e9501e1f311b6bc92220c44c154e0be36a53926daa3294ae",
+    "measurement/q8-1-process.json": "a037754890bcd017f7e0c6b442c0f6195e034cffc657c228e36b7e462fe4a4f8",
+    "measurement/q8-1-server.log": "a51d6082fe641f1d358cc1be27054acb3b666717ed44c18d50b387393e96bcea",
+    "measurement/q8-1-warmup.json": "b71135f20c8fba9dbe04e19beb8562183e99166bd95b8734fac292e0324dea60",
+    "measurement/q8-2-0-chinese.json": "ea35422ccc0cb207fd567d9806f40242275c2a8bfc3afbb218901d779ad1c9dc",
+    "measurement/q8-2-0-english.json": "292cd76c564be92805c7477e4917aa2cbaf6e7048e64c18f883fb0e91e10e7dc",
+    "measurement/q8-2-0-python.json": "fa6ab2a76ba6a0542ac5f22b67ba8c9eefb51ae83935644d5e51564ecaa81b45",
+    "measurement/q8-2-1-chinese.json": "e9da422eef1c5617c519e986def9c8a8b7267b3881f9524f4b66ddeab5a834c1",
+    "measurement/q8-2-1-english.json": "c0331ec029e85e41043452c8f34c650263770cbe773e333d233d2147f1867e32",
+    "measurement/q8-2-1-python.json": "8c8dcf6678c9debefac8412e92f9b02ba1f9662c97766d3fc25ff7418c5eee35",
+    "measurement/q8-2-2-chinese.json": "ede87832a8635bb6a8c07ccff581e433c68b00358ca324cf32915976edbde55a",
+    "measurement/q8-2-2-english.json": "90df4d51cb20623aa850730037bfde4cebc3d71551255d9eeed6ab076576069b",
+    "measurement/q8-2-2-python.json": "eca6c11f77580d102be7bbfd0f05523c1af50031a822f07c07214f24907745f9",
+    "measurement/q8-2-process.json": "a7569d317bc30d3674cd9b83865d2fe85e096abe4ba39602313e81cd08197af9",
+    "measurement/q8-2-server.log": "59161419d301940df1de36cfaabcc8672f1755e2a6a0801d8bc312a9d910c004",
+    "measurement/q8-2-warmup.json": "0571d04abd095d7b08106726f4b8c5af0df666c38f2ecdbda72369f5841d1107",
+    "measurement/runs.json": "549c6c44a80c9bd2c6f7a1ea8424fa3ab11dbdb0059acc4515574861a72c257f",
+    "measurement/smoke-process.json": "cfeebc9974517674a5b283119aed2d63067c5f1d834e6b5549b987fe98718b1f",
+    "measurement/smoke-server.log": "3834cb31fb621e5c35d7b4dc3bb056a8a76eb57a0069af870aa7e5a0a7aec9e2",
+    "measurement/smoke.json": "d8c8fb2fc212d29b463580ee5e6d7824c9ea47702e51ea39d6ddc39da5193db8",
+    "measurement/summary.json": "75c603873f354360b6a2c3105e7b3501ccc16e3e836977141e75aa5a5b751227",
+    "measurement-queued-v1/ABORTED.json": "936a97fef42e0680dbd8503e358eabe9e592ec575d5155ce5c5614d6eb13f0db",
+    "measurement-queued-v1/runner.py": "853087b3701aa56a47541c606dea3c2fdbaf46c33ff3230cb9491613026f6f92",
+    "measurement-queued-v1.log": "de5470697f04aa08a240d3fe592f31f6d19fdf31d0ec76dd206867a292ab3233",
+    "measurement-run.log": "ae28b933f2b480413cb3b232f5aa69145aba2c016e5738789ce5899907cdcc02",
+    "quantization/input-header.json": "d65eaee9f9bd9c3d14758c5a979fde401e7e0d2c8d8743a0101e9c2b13454472",
+    "quantization/output-header.json": "11d0c9a5552acd90ced66d1b98c3db7b4ec3eb1aeb7eff2edbd0d54653ef7fee",
+    "quantization/provenance.json": "fd81fe4ffda5ab30e91daecd1d689f4bf4f482b784d8f2e9a615c8b9c09989ed",
+    "quantization/quantize.log": "fab4b71ebc158cf35ea4da597a60c05386da2b166f8272ba2f3c6e8d5318d21d",
+    "quantization/tensor-types.txt": "458e0e8547ea752bbf7719aeb51342b6a5c7b0782d3f7f1fc07588ec9cd26a8f",
+    "quantization-run.log": "5d7236f0401eb3952339e79e46478226fbf783cc5ab2c8aa6bf95f63699aa86e",
+    "quantize_q8.py": "f6e10097010171be49cedbf5669e884b3476855f080833b06b1ce906754b7c6c",
+    "summarize_q8.py": "25e71a749723de7076472eab34915fa5331ce333120ea0e5ac43b6f116631c22"
+  }
+}

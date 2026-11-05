@@ -1276,6 +1276,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             }
         }
 
+        // Probabilistic DSpark reads Markov W2 on the host; CPU_REPACK has no get_tensor.
+        if (tn.tensor == LLM_TENSOR_DSPARK_MARKOV_W2 && strcmp(ggml_backend_buft_name(buft), "CPU_REPACK") == 0) {
+            buft = ggml_backend_cpu_buffer_type();
+        }
+
         // avoid using a host buffer when using mmap
         auto * buft_dev = ggml_backend_buft_get_device(buft);
         if (use_mmap && buft_dev && buft == ggml_backend_dev_host_buffer_type(buft_dev)) {

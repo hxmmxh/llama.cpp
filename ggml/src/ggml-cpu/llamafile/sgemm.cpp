@@ -1640,20 +1640,16 @@ class tinyBLAS_Q0_AVX {
                         dvec = _mm256_permute2f128_ps(dvec ,dvec, 0);
                         // Computation of dot product and multiplication with appropriate delta value products
                         Cv[j][0] = madd(_mm256_shuffle_ps(dvec, dvec, 0),
-                                    updot(_mm256_sign_epi8(avec0, avec0),
-                                          _mm256_sign_epi8(load(B + ldb * (jj + j) + l), avec0)),
+                                    sdot(avec0, load(B + ldb * (jj + j) + l)),
                                     Cv[j][0]);
                         Cv[j][1] = madd(_mm256_shuffle_ps(dvec, dvec, 85),
-                                    updot(_mm256_sign_epi8(avec1, avec1),
-                                            _mm256_sign_epi8(load(B + ldb * (jj + j) + l), avec1)),
+                                    sdot(avec1, load(B + ldb * (jj + j) + l)),
                                     Cv[j][1]);
                         Cv[j][2] = madd(_mm256_shuffle_ps(dvec, dvec, 170),
-                                    updot(_mm256_sign_epi8(avec2, avec2),
-                                            _mm256_sign_epi8(load(B + ldb * (jj + j) + l), avec2)),
+                                    sdot(avec2, load(B + ldb * (jj + j) + l)),
                                     Cv[j][2]);
                         Cv[j][3] = madd(_mm256_shuffle_ps(dvec, dvec, 255),
-                                    updot(_mm256_sign_epi8(avec3, avec3),
-                                            _mm256_sign_epi8(load(B + ldb * (jj + j) + l), avec3)),
+                                    sdot(avec3, load(B + ldb * (jj + j) + l)),
                                     Cv[j][3]);
                 }
             }
@@ -1694,24 +1690,16 @@ class tinyBLAS_Q0_AVX {
                     dvec = _mm256_permute2f128_ps(dvec ,dvec, 0);
                     // Computation of dot product and multiplication with appropriate delta value products
                     Cv[0][i] = madd(_mm256_shuffle_ps(dvec, dvec, 0),
-                                    updot(_mm256_sign_epi8(load(A + lda * (ii + i) + l),
-                                                            load(A + lda * (ii + i) + l)),
-                                            _mm256_sign_epi8(bvec0, load(A + lda * (ii + i) + l))),
+                                    sdot(load(A + lda * (ii + i) + l), bvec0),
                                     Cv[0][i]);
                     Cv[1][i] = madd(_mm256_shuffle_ps(dvec, dvec, 85),
-                                    updot(_mm256_sign_epi8(load(A + lda * (ii + i) + l),
-                                                            load(A + lda * (ii + i) + l)),
-                                            _mm256_sign_epi8(bvec1, load(A + lda * (ii + i) + l))),
+                                    sdot(load(A + lda * (ii + i) + l), bvec1),
                                     Cv[1][i]);
                     Cv[2][i] = madd(_mm256_shuffle_ps(dvec, dvec, 170),
-                                    updot(_mm256_sign_epi8(load(A + lda * (ii + i) + l),
-                                                            load(A + lda * (ii + i) + l)),
-                                            _mm256_sign_epi8(bvec2, load(A + lda * (ii + i) + l))),
+                                    sdot(load(A + lda * (ii + i) + l), bvec2),
                                     Cv[2][i]);
                     Cv[3][i] = madd(_mm256_shuffle_ps(dvec, dvec, 255),
-                                    updot(_mm256_sign_epi8(load(A + lda * (ii + i) + l),
-                                                            load(A + lda * (ii + i) + l)),
-                                            _mm256_sign_epi8(bvec3, load(A + lda * (ii + i) + l))),
+                                    sdot(load(A + lda * (ii + i) + l), bvec3),
                                     Cv[3][i]);
                 }
             }
@@ -1740,10 +1728,7 @@ class tinyBLAS_Q0_AVX {
                 for (int64_t j = 0; j < RN; ++j)
                     for (int64_t i = 0; i < RM; ++i) {
 #if defined(__AVX2__)
-                        __m256 udTmp = updot(_mm256_sign_epi8(load(A + lda * (ii + i) + l),
-                                                              load(A + lda * (ii + i) + l)),
-                                             _mm256_sign_epi8(load(B + ldb * (jj + j) + l),
-                                                              load(A + lda * (ii + i) + l)));
+                        __m256 udTmp = sdot(load(A + lda * (ii + i) + l), load(B + ldb * (jj + j) + l));
 #else
                         __m128i ali0 = load0(A + lda * (ii + i) + l);
                         __m128i ali1 = load1(A + lda * (ii + i) + l);
@@ -1840,6 +1825,14 @@ class tinyBLAS_Q0_AVX {
     inline __m128i load1(const block_iq4_nl *b) {
         const __m128i x = _mm_loadu_si128((const __m128i *)(b->qs));
         return _mm_shuffle_epi8(iq4nlt, _mm_and_si128(_mm_set1_epi8(15), _mm_srli_epi16(x, 4)));
+    }
+
+    inline __m256 sdot(__m256i a, __m256i b) {
+#if defined(__AVXVNNIINT8__)
+        return _mm256_cvtepi32_ps(_mm256_dpbssd_epi32(_mm256_setzero_si256(), a, b));
+#else
+        return updot(_mm256_sign_epi8(a, a), _mm256_sign_epi8(b, a));
+#endif
     }
 
     inline __m256 updot(__m256i u, __m256i s) {

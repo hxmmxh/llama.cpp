@@ -264,7 +264,7 @@ static void llama_log_softmax(float * array, size_t size) {
 */
 
 static void llama_sampler_temp_impl(llama_token_data_array * cur_p, float temp) {
-    if (cur_p->size == 0) {
+    if (cur_p->size == 0 || temp == 1.0f) {
         return;
     }
 
@@ -1190,43 +1190,28 @@ static void llama_sampler_dist_apply(struct llama_sampler * smpl, llama_token_da
         sum_cum += p;
     }
 
-#if 1
-    // sample from the obtained probabilities and normalize the probs in a single pass
-    // this is ~3x faster on Mac with full gpt-oss vocab than the version below
-    //
     const double rnd = dist(ctx->rng);
-
-          double sum_run = 0.0f;
     const double sum_tgt = sum_cum*rnd;
-
+    double sum_run = 0.0f;
     bool found = false;
     for (size_t i = 0; i < cur_p->size; ++i) {
-        if (!found) {
-            // accumulate probs until we reach the target sum
-            sum_run += cur_p->data[i].p;
-            if (sum_run >= sum_tgt) {
-                cur_p->selected = i;
-                found = true;
-            }
+        sum_run += cur_p->data[i].p;
+        if (sum_run >= sum_tgt) {
+            cur_p->selected = i;
+            found = true;
+            break;
         }
+    }
 
-        // normalize probs
+    // Keep normalization independent of the prefix search so it can vectorize.
+    for (size_t i = 0; i < cur_p->size; ++i) {
         cur_p->data[i].p /= sum_cum;
     }
 
-    // fallback to the last token (don't think this can happen)
     assert(found);
     if (!found) {
         cur_p->selected = cur_p->size - 1;
     }
-#else
-    // for clarity, this is the same as above but does one pass for normalization and one extra pass for sampling
-    for (size_t i = 0; i < cur_p->size; ++i) {
-        cur_p->data[i].p /= sum_cum;
-    }
-
-    cur_p->selected = llama_sample_dist(cur_p, ctx->rng);
-#endif
 }
 
 static void llama_sampler_dist_reset(struct llama_sampler * smpl) {
