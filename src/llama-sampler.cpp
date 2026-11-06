@@ -133,7 +133,7 @@ struct ring_buffer {
 };
 
 // writes result in res, does not mutate cur
-static void llama_token_data_array_partial_sort(const llama_token_data_array & cur, int npartial, std::vector<llama_token_data> & res) {
+static void llama_token_data_array_partial_sort(const llama_token_data_array & cur, int npartial, std::vector<llama_token_data> & res, float top_p = 1.0f, size_t min_keep = 0) {
     static const auto comp = [](const llama_token_data & a, const llama_token_data & b) {
         return a.logit > b.logit;
     };
@@ -182,8 +182,19 @@ static void llama_token_data_array_partial_sort(const llama_token_data_array & c
 
     ptr = res.data();
     int ndone = 0;
+    float cum_sum = 0.0f;
     for (int j = nbuckets - 1; j > ib; --j) {
         std::sort(ptr, ptr + histo[j], comp);
+        if (top_p < 1.0f && min_keep < (size_t) npartial && ndone + histo[j] < npartial) {
+            for (int i = 0; i < histo[j]; ++i) {
+                cum_sum += ptr[i].p;
+                const size_t nkeep = ndone + i + 1;
+                if (cum_sum >= top_p && nkeep >= min_keep) {
+                    res.resize(nkeep);
+                    return;
+                }
+            }
+        }
         ptr += histo[j];
         ndone += histo[j];
     }
@@ -1579,7 +1590,12 @@ static void llama_sampler_top_p_apply(struct llama_sampler * smpl, llama_token_d
         // we exceeded the current top-k heuristic -> increase k and continue
         if (!cur_p->sorted && i == k - 1) {
             k = cur_p->size;
-            llama_token_data_array_partial_sort(*cur_p, k, buf_sort);
+            // Low-probability buckets do not need sorting once the nucleus is complete.
+            llama_token_data_array_partial_sort(*cur_p, k, buf_sort, ctx->p, ctx->min_keep);
+            if (buf_sort.size() < k) {
+                last_idx = buf_sort.size();
+                break;
+            }
             pdata = buf_sort.data();
         }
     }

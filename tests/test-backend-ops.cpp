@@ -12799,6 +12799,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+    // GQA4 small batches keep each token's mask and the full KV traversal.
+    for (int64_t nq : {7, 8}) {
+        for (int64_t kv : {511, 512, 768}) {
+            for (std::array<int32_t, 4> permute : {std::array<int32_t, 4>{0, 1, 2, 3}, {0, 2, 1, 3}}) {
+                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, kv, nq, true, false, 0, 0,
+                    GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, permute));
+            }
+        }
+    }
+    test_cases.emplace_back(new test_flash_attn_ext_large_logits(256, 256, 4, {4, 1}, 513, 8));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 2}, 513, 8));
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 8, true, true));
+
     // Sparse masks leave some chunks empty; large logits force online softmax rescaling.
     test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, 513, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 2, 1, 3}, true, false, 32));
     test_cases.emplace_back(new test_flash_attn_ext_large_logits(256, 256, 4, {4, 1}, 513, 1));

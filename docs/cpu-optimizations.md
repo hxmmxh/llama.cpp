@@ -145,3 +145,18 @@ Regression commands:
 **x64 Q6 M8 valid columns and signed dot (2026-11-05)**
 
 [Validation and scope](q6-m8-20261105.md): compute eight valid positions in the Q6 narrow path and use signed-byte VNNI where available. Ultra 7 fixed-history M8 cost falls from 123.484/137.955 ms to 108.845/121.431 ms at D128/D512 versus the historical Q8-signed build (about 12%). The selected three-file change matches the tested snapshot. Other candidates remain experimental; this round does not measure end-to-end DSpark throughput.
+
+
+**x64 Q8 M7/M8 position reuse (2026-11-05)**
+
+[Validation and scope](q8-reuse43-20261105.md): signed-byte VNNI with 16 vector registers processes two output channels across 4+3 positions for M7, or 4+4 for M8. The integrated dispatch retains the original tiling when channel pairs cannot fill every worker. In the prior same-runtime Ultra 7 comparison, M7 shared-head cost falls from 11.821 to 7.707 ms, draft cost from 43.411 to 36.064 ms/round, and probability-generation throughput rises from 22.710 to 23.848 tokens/s (+5.01%). The compute helpers match that measured candidate; ISA compilation and 564 dispatch checks cover the added occupancy guard.
+
+
+**CPU hotspot follow-up (2026-11-05)**
+
+[Implementation and validation](cpu-hotspots-20261105.md): Q4_K VNNI GEMV, F16 GQA4 M7/M8 attention and top-p nucleus sorting, combined with the Q8 position reuse above. Whole-model observations, unchanged-output checks, historical comparison limits and retained negative results are documented separately.
+
+
+**CPU hotspot round 2 (2026-11-06)**
+
+[Implementation and validation](cpu-hotspots-20261106.md): Q4_K M4/M8 two-row VNNI reuse and F16 GQA4 pair dot. The six-process Ultra 7 DSpark aggregate is 25.7336 tokens/s versus the historical previous combined version's 23.9722 (+7.35% observed); ordinary generation is effectively unchanged. Historical-comparison limits, unchanged outputs and retained performance regressions are documented separately. The same page lists all six retained optimizations in this combined integration.

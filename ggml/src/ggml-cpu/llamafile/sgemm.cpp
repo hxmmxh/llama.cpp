@@ -1460,6 +1460,24 @@ class tinyBLAS_Q0_AVX {
     }
 
     void matmul(int64_t m, int64_t n) {
+#if defined(__AVXVNNIINT8__) && defined(__F16C__) && VECTOR_REGISTERS == 16
+        if constexpr (std::is_same<TA, block_q8_0>::value && std::is_same<TB, block_q8_0>::value) {
+            if (m / 2 >= nth && (n == 7 || n == 8)) {
+                const int64_t tiles = m / 2;
+                const int64_t duty = (tiles + nth - 1) / nth;
+                // Keep position tiles when channel pairs leave workers idle.
+                if ((nth - 1) * duty < tiles) {
+                    if (n == 7) {
+                        gemm_q8_43<3>(m);
+                    } else {
+                        gemm_q8_43<4>(m);
+                    }
+                    mnpack(m / 2 * 2, m, 0, n);
+                    return;
+                }
+            }
+        }
+#endif
         mnpack(0, m, 0, n);
     }
 
@@ -1608,6 +1626,46 @@ class tinyBLAS_Q0_AVX {
         mnpack(mp, m, n0, np);
         mnpack(m0, m, np, n);
     }
+
+#if defined(__AVXVNNIINT8__) && defined(__F16C__) && VECTOR_REGISTERS == 16
+    template <int RN>
+    inline void gemm_q8_2xn(int64_t ii, int64_t jj) {
+        __m256 Cv[RN][2] = {};
+        for (int64_t l = 0; l < k; ++l) {
+            const auto * a0 = A + lda * ii + l;
+            const auto * a1 = A + lda * (ii + 1) + l;
+            const uint32_t a_delta = (uint32_t) a0->d | ((uint32_t) a1->d << 16);
+            const __m128 da = _mm_cvtph_ps(_mm_cvtsi32_si128(a_delta));
+            const __m256i av0 = load(a0);
+            const __m256i av1 = load(a1);
+            // Keep only one activation block live beside the two reused weights.
+            for (int j = 0; j < RN; ++j) {
+                const auto * b = B + ldb * (jj + j) + l;
+                const __m256i bv = load(b);
+                const __m128 d = _mm_mul_ps(da, _mm_set1_ps(unhalf(b->d)));
+                Cv[j][0] = madd(_mm256_broadcastss_ps(d), sdot(av0, bv), Cv[j][0]);
+                Cv[j][1] = madd(_mm256_broadcastss_ps(_mm_shuffle_ps(d, d, 85)), sdot(av1, bv), Cv[j][1]);
+            }
+        }
+        for (int j = 0; j < RN; ++j) {
+            C[ldc * (jj + j) + ii] = hsum(Cv[j][0]);
+            C[ldc * (jj + j) + ii + 1] = hsum(Cv[j][1]);
+        }
+    }
+
+    template <int RT>
+    NOINLINE void gemm_q8_43(int64_t m) {
+        const int64_t tiles = m / 2;
+        const int64_t duty = (tiles + nth - 1) / nth;
+        const int64_t start = duty * ith;
+        const int64_t end = MIN(start + duty, tiles);
+        for (int64_t job = start; job < end; ++job) {
+            // Complete both position groups before advancing to the next weight pair.
+            gemm_q8_2xn<4>(2 * job, 0);
+            gemm_q8_2xn<RT>(2 * job, 4);
+        }
+    }
+#endif
 
 #if defined(__AVX2__) && defined(__F16C__)
 // Templated functions for gemm of dimensions 4xN

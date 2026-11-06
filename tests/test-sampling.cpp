@@ -135,6 +135,90 @@ static void test_top_p(const std::vector<float> & probs, const std::vector<float
     tester.check();
 }
 
+static void test_top_p_large() {
+    for (size_t n : {size_t(1025), size_t(4096), size_t(131072)}) {
+        std::vector<llama_token_data> data(n);
+        float sum = 0.0f;
+        const float max_l = float(n - 1)/4096.0f - 16.0f;
+        for (size_t i = 0; i < n; ++i) {
+            const float logit = float((i*7919) % n)/4096.0f - 16.0f;
+            const float prob = expf(logit - max_l);
+            data[i] = { (llama_token) i, logit, prob };
+            sum += prob;
+        }
+        auto expected = data;
+        for (auto & token : expected) {
+            token.p /= sum;
+        }
+        std::sort(expected.begin(), expected.end(), [](const llama_token_data & a, const llama_token_data & b) {
+            return a.logit > b.logit;
+        });
+
+        for (float p : {0.01f, 0.5f, 0.95f, 0.999f}) {
+            for (size_t min_keep : {size_t(1), size_t(300), n}) {
+                size_t keep = n;
+                float cum_sum = 0.0f;
+                for (size_t i = 0; i < n; ++i) {
+                    cum_sum += expected[i].p;
+                    if (cum_sum >= p && i + 1 >= min_keep) {
+                        keep = i + 1;
+                        break;
+                    }
+                }
+                auto cur = data;
+                llama_token_data_array arr = { cur.data(), cur.size(), -1, false };
+                auto * sampler = llama_sampler_init_top_p(p, min_keep);
+                llama_sampler_apply(sampler, &arr);
+                llama_sampler_free(sampler);
+                GGML_ASSERT(arr.size == keep && arr.sorted);
+                for (size_t i = 0; i < keep; ++i) {
+                    GGML_ASSERT(arr.data[i].id == expected[i].id);
+                    GGML_ASSERT(arr.data[i].p == expected[i].p);
+                }
+            }
+        }
+    }
+}
+
+static void test_top_p_ties() {
+    std::vector<llama_token_data> data(4096);
+    float sum = 0.0f;
+    for (size_t i = 0; i < data.size(); ++i) {
+        const float logit = -float(i % 16);
+        data[i] = { (llama_token) i, logit, expf(logit) };
+        sum += data[i].p;
+    }
+    auto expected = data;
+    for (auto & token : expected) {
+        token.p /= sum;
+    }
+    std::sort(expected.begin(), expected.end(), [](const llama_token_data & a, const llama_token_data & b) {
+        return a.logit > b.logit;
+    });
+    for (float p : {0.5f, 0.95f}) {
+        for (size_t min_keep : {255, 256, 257, 600, 1300}) {
+            size_t keep = 0;
+            float cum_sum = 0.0f;
+            while (keep < expected.size() && (cum_sum < p || keep < min_keep)) {
+                cum_sum += expected[keep++].p;
+            }
+            auto cur = data;
+            llama_token_data_array arr = { cur.data(), cur.size(), -1, false };
+            auto * sampler = llama_sampler_init_top_p(p, min_keep);
+            llama_sampler_apply(sampler, &arr);
+            llama_sampler_free(sampler);
+            GGML_ASSERT(arr.size == keep && arr.sorted);
+            std::vector<bool> seen(data.size(), false);
+            for (size_t i = 0; i < keep; ++i) {
+                GGML_ASSERT(arr.data[i].logit == expected[i].logit && arr.data[i].p == expected[i].p);
+                GGML_ASSERT(arr.data[i].id >= 0 && (size_t) arr.data[i].id < seen.size());
+                GGML_ASSERT(!seen[arr.data[i].id]);
+                seen[arr.data[i].id] = true;
+            }
+        }
+    }
+}
+
 static void test_min_p(const std::vector<float> & probs, const std::vector<float> & probs_expected, float p) {
     sampler_tester tester(probs, probs_expected);
 
@@ -339,6 +423,8 @@ int main(void) {
     ggml_time_init();
 
     test_dist_singleton_rng();
+    test_top_p_large();
+    test_top_p_ties();
 
     test_temp({0.1f, 0.2f, 0.3f, 0.4f}, {0.1f, 0.2f, 0.3f, 0.4f}, 1.0f);
     test_temp({0.1f, 0.2f, 0.3f, 0.4f}, {0.0f, 0.0f, 0.0f, 1.0f}, 0.0f);

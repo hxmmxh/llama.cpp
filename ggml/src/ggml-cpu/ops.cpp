@@ -8910,17 +8910,53 @@ void ggml_compute_forward_top_k(
     }
 }
 
+// Preserve each dot product's accumulator and reduction order while loading
+// and converting the shared key once for two query heads. Eight accumulators
+// fit AVX2's register file; a four-head implementation would need sixteen.
+#if defined(__AVX2__) && defined(__F16C__) && !defined(__AVX512F__)
+static inline void ggml_vec_dot_f16_pair_256(
+        const ggml_fp16_t * key,
+        const ggml_fp16_t * query0,
+        const ggml_fp16_t * query1,
+        float * scores) {
+    GGML_F16_DOT_VEC sum0[GGML_F16_DOT_ARR] = { GGML_F16_DOT_VEC_ZERO };
+    GGML_F16_DOT_VEC sum1[GGML_F16_DOT_ARR] = { GGML_F16_DOT_VEC_ZERO };
+#if defined(__clang__)
+#pragma clang loop unroll(disable)
+#elif defined(__GNUC__)
+#pragma GCC unroll 1
+#endif
+    for (int i = 0; i < 256; i += GGML_F16_DOT_STEP) {
+        for (int j = 0; j < GGML_F16_DOT_ARR; ++j) {
+            const int d = i + j * GGML_F16_DOT_EPR;
+            const GGML_F16_DOT_VEC k = GGML_F16_DOT_VEC_LOAD(key + d, j);
+            const GGML_F16_DOT_VEC q0 = GGML_F16_DOT_VEC_LOAD(query0 + d, j);
+            const GGML_F16_DOT_VEC q1 = GGML_F16_DOT_VEC_LOAD(query1 + d, j);
+            sum0[j] = GGML_F16_DOT_VEC_FMA(sum0[j], k, q0);
+            sum1[j] = GGML_F16_DOT_VEC_FMA(sum1[j], k, q1);
+        }
+    }
+    ggml_float score0, score1;
+    GGML_F16_DOT_VEC_REDUCE(score0, sum0);
+    GGML_F16_DOT_VEC_REDUCE(score1, sum1);
+    assert(!isnan(score0) && !isinf(score0));
+    assert(!isnan(score1) && !isinf(score1));
+    scores[0] = score0;
+    scores[1] = score1;
+}
+#endif
+
 static void ggml_compute_forward_flash_attn_ext_f16_group4(
         const ggml_compute_params * params,
         ggml_tensor * dst,
-        int head,
+        int head, int token,
         int64_t ic_start, int64_t ic_end,
         float * partials, int64_t partial_stride) {
     const ggml_tensor * q = dst->src[0];
     const ggml_tensor * k = dst->src[1];
     const ggml_tensor * v = dst->src[2];
     const ggml_tensor * mask = dst->src[3];
-    const ggml_fp16_t * mp = mask ? (const ggml_fp16_t *) mask->data : nullptr;
+    const ggml_fp16_t * mp = mask ? (const ggml_fp16_t *) ((const char *) mask->data + token * mask->nb[1]) : nullptr;
     const int kv_head = head / 4;
     alignas(64) ggml_fp16_t query[4][256];
     alignas(64) ggml_fp16_t accum[4][256] = {};
@@ -8929,7 +8965,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_group4(
     float scale;
     memcpy(&scale, dst->op_params, sizeof(scale));
     for (int h = 0; h < 4; ++h) {
-        const float * row = (const float *) ((const char *) q->data + (head + h) * q->nb[2]);
+        const float * row = (const float *) ((const char *) q->data + token * q->nb[1] + (head + h) * q->nb[2]);
         ggml_cpu_fp32_to_fp16(row, query[h], 256);
     }
     for (int64_t ic = ic_start; ic < ic_end; ++ic) {
@@ -8940,9 +8976,18 @@ static void ggml_compute_forward_flash_attn_ext_f16_group4(
         const ggml_fp16_t * key = (const ggml_fp16_t *) ((const char *) k->data + ic * k->nb[1] + kv_head * k->nb[2]);
         const ggml_fp16_t * value = (const ggml_fp16_t *) ((const char *) v->data + ic * v->nb[1] + kv_head * v->nb[2]);
         // Keep the original dot product and online softmax order for each head.
+#if defined(__AVX2__) && defined(__F16C__) && !defined(__AVX512F__)
+        float scores[4];
+        ggml_vec_dot_f16_pair_256(key, query[0], query[1], scores);
+        ggml_vec_dot_f16_pair_256(key, query[2], query[3], scores + 2);
+#endif
         for (int h = 0; h < 4; ++h) {
             float score;
+#if defined(__AVX2__) && defined(__F16C__) && !defined(__AVX512F__)
+            score = scores[h];
+#else
             ggml_vec_dot_f16(256, &score, 0, const_cast<ggml_fp16_t *>(key), 0, query[h], 0, 1);
+#endif
             score = score * scale;
             score += bias;
             float ms = 1.0f;
@@ -8960,11 +9005,19 @@ static void ggml_compute_forward_flash_attn_ext_f16_group4(
         }
     }
     for (int h = 0; h < 4; ++h) {
-        float * partial = partials + (head + h) * partial_stride;
-        partial[0] = maximum[h];
-        partial[1] = sum[h];
-        for (int d = 0; d < 256; ++d) {
-            partial[2 + d] = GGML_CPU_FP16_TO_FP32(accum[h][d]);
+        if (partials) {
+            float * partial = partials + (head + h) * partial_stride;
+            partial[0] = maximum[h];
+            partial[1] = sum[h];
+            for (int d = 0; d < 256; ++d) {
+                partial[2 + d] = GGML_CPU_FP16_TO_FP32(accum[h][d]);
+            }
+        } else {
+            float * output = (float *) ((char *) dst->data + token * dst->nb[2] + (head + h) * dst->nb[1]);
+            for (int d = 0; d < 256; ++d) {
+                output[d] = GGML_CPU_FP16_TO_FP32(accum[h][d]);
+            }
+            ggml_vec_scale_f32(256, output, sum[h] == 0.0f ? 0.0f : 1.0f / sum[h]);
         }
     }
     GGML_UNUSED(params);
@@ -9709,6 +9762,31 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     const bool kv_is_f32_or_f16 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
     const bool use_split_kv_path = !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
 
+    const ggml_tensor * mask = dst->src[3];
+    float max_bias;
+    float logit_softcap;
+    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(max_bias));
+    memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(logit_softcap));
+    const bool use_group4 = q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16 &&
+        DK == 256 && DV == 256 && neq2 <= INT32_MAX &&
+        neq2 % 4 == 0 && neq2 / 4 == nek2 && nek2 == nev2 && max_bias == 0.0f && logit_softcap == 0.0f &&
+        dst->src[4] == nullptr && (!mask || (mask->type == GGML_TYPE_F16 && mask->ne[2] == 1 && mask->ne[3] == 1));
+    if (!use_ref && (neq1 == 7 || neq1 == 8) && use_group4 && !ggml_is_numa() &&
+        neq3 == 1 && nek3 == 1 && nev3 == 1 && nek1 >= 512 && nev1 == nek1 &&
+        neq1 * (neq2 / 4) >= nth) {
+        const int64_t groups = neq2 / 4;
+        const int64_t jobs = neq1 * groups;
+        if (ith == 0) {
+            ggml_threadpool_chunk_set(params->threadpool, nth);
+        }
+        ggml_barrier(params->threadpool);
+        for (int64_t job = ith; job < jobs; job = ggml_threadpool_chunk_add(params->threadpool, 1)) {
+            ggml_compute_forward_flash_attn_ext_f16_group4(
+                params, dst, 4 * (job % groups), job / groups, 0, nek1, nullptr, 0);
+        }
+        return;
+    }
+
     if (use_split_kv_path) {
         const int64_t chunk_size = (nek1 + nth - 1) / nth;
 
@@ -9722,14 +9800,6 @@ static void ggml_compute_forward_flash_attn_ext_f16(
         const int64_t partial_stride = nth * partial_size;
         float *       chunk_partials = partials_base + ith * partial_size;
 
-        const ggml_tensor * mask = dst->src[3];
-        float max_bias;
-        float logit_softcap;
-        memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(max_bias));
-        memcpy(&logit_softcap, (const float *) dst->op_params + 2, sizeof(logit_softcap));
-        const bool use_group4 = k->type == GGML_TYPE_F16 && DK == 256 && DV == 256 && neq2 <= INT32_MAX &&
-            neq2 % 4 == 0 && neq2 / 4 == nek2 && nek2 == nev2 && max_bias == 0.0f && logit_softcap == 0.0f &&
-            dst->src[4] == nullptr && (!mask || (mask->type == GGML_TYPE_F16 && mask->ne[2] == 1 && mask->ne[3] == 1));
         if (use_group4) {
             const int64_t groups = neq2 / 4;
             // Each job writes one head group in one chunk; the partials layout and reduction stay unchanged.
@@ -9741,7 +9811,7 @@ static void ggml_compute_forward_flash_attn_ext_f16(
                 float * group_partials = partials_base + part * partial_size;
                 if (start < nek1) {
                     ggml_compute_forward_flash_attn_ext_f16_group4(
-                        params, dst, head, start, end, group_partials, partial_stride);
+                        params, dst, head, 0, start, end, group_partials, partial_stride);
                 } else {
                     for (int64_t h = head; h < head + 4; ++h) {
                         float * partial = group_partials + h * partial_stride;
