@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama.h"
+#include "llama-dspark-device.h"
 
 #include <cstdint>
 #include <vector>
@@ -35,6 +36,9 @@ struct llama_cparams {
     bool embeddings;
     bool embeddings_nextn;        // also extract the hidden state before the final output norm
     bool embeddings_nextn_masked; // extract for only rows where batch.logits != 0
+    llama_dspark_device_sampling * dspark_device_sampling = nullptr;
+    llama_dspark_device_features * dspark_device_features = nullptr;
+    bool dspark_device_extract = false;
     bool dspark_probabilistic = false; // expose unconditioned logits for CPU-side DSpark sampling
     bool causal_attn;
     bool offload_kqv;

@@ -14,6 +14,7 @@
 #include "llama-sampler.h"
 #include "llama.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -1370,6 +1371,149 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
     cparams.embeddings_nextn_masked = masked;
 }
 
+
+bool llama_context::init_dspark_device(llama_context & target) {
+    if (model.arch != LLM_ARCH_DFLASH || model.hparams.dsv4_hc_mult > 0 ||
+        cparams.n_seq_max != 1 || target.cparams.n_seq_max != 1 || !model.dspark_markov_w1 || !model.dspark_markov_w2 || model.d2t) {
+        throw std::runtime_error("device DSpark requires a full-vocabulary, single-sequence draft");
+    }
+    const auto anchor = model.gguf_kv.find("dflash.sample_from_anchor");
+    if (anchor != model.gguf_kv.end() && anchor->second != "true") {
+        throw std::runtime_error("device DSpark requires anchor-first sampling");
+    }
+    auto * buft = ggml_backend_buffer_get_type(model.dspark_markov_w2->buffer);
+    auto * device = ggml_backend_buft_get_device(buft);
+    if (!device || ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+        throw std::runtime_error("device DSpark requires GPU-resident Markov weights");
+    }
+    if (ggml_backend_buft_get_device(ggml_backend_buffer_get_type(model.dspark_markov_w1->buffer)) != device) {
+        throw std::runtime_error("device DSpark requires both Markov weights on the same GPU");
+    }
+    auto find_backend = [&](llama_context & ctx) -> ggml_backend_t {
+        for (auto & backend : ctx.backends) {
+            if (ggml_backend_get_device(backend.get()) == device) { return backend.get(); }
+        }
+        return nullptr;
+    };
+    auto * backend = find_backend(*this);
+    if (!backend || !find_backend(target)) {
+        throw std::runtime_error("device DSpark requires target and draft on the same GPU");
+    }
+    synchronize();
+    target.synchronize();
+    dspark_sampling.backend = backend;
+    dspark_features.backend = backend;
+    dspark_features.capacity = target.cparams.n_batch;
+    cparams.dspark_device_sampling = &dspark_sampling;
+    cparams.dspark_device_features = &dspark_features;
+    target.cparams.dspark_device_extract = true;
+    sched_need_reserve = target.sched_need_reserve = true;
+    LLAMA_LOG_INFO("%s: DSpark Markov, categorical sampling and feature concatenation on %s\n", __func__, ggml_backend_name(backend));
+    return true;
+}
+
+void llama_context::reset_dspark_device(llama_context & target) {
+    synchronize();
+    target.synchronize();
+    cparams.dspark_device_sampling = nullptr;
+    cparams.dspark_device_features = nullptr;
+    target.cparams.dspark_device_extract = false;
+    dspark_features.layers.clear();
+    target.dspark_layers.clear();
+    target.dspark_batch_idxs.clear();
+    sched_need_reserve = target.sched_need_reserve = true;
+}
+
+void llama_dspark_device_reset(llama_context * target, llama_context * draft) {
+    draft->reset_dspark_device(*target);
+}
+
+void llama_context::set_dspark_device_features(llama_context & target, size_t row_offset, size_t n_rows) {
+    GGML_ASSERT(cparams.dspark_device_features && n_rows > 0);
+    target.synchronize();
+    dspark_features.layers.clear();
+    for (const int32_t lid : model.target_layer_ids) {
+        if (lid < 0 || (size_t) lid >= target.dspark_layers.size()) {
+            throw std::runtime_error("DSpark device feature layer missing");
+        }
+        auto & layer = target.dspark_layers[lid];
+        if (!layer.tensor || row_offset > layer.valid_rows || n_rows > layer.valid_rows - row_offset) {
+            throw std::runtime_error("DSpark device feature rows out of range");
+        }
+        if (ggml_backend_get_device(layer.backend) != ggml_backend_get_device(dspark_features.backend)) {
+            throw std::runtime_error("DSpark feature device mismatch");
+        }
+        dspark_features.layers.push_back(layer.tensor);
+    }
+    const size_t total = target.dspark_batch_idxs.size();
+    if (row_offset > total || n_rows > total - row_offset) {
+        throw std::runtime_error("DSpark feature batch mapping missing");
+    }
+    std::vector<int32_t> inverse(total, -1);
+    for (size_t i = 0; i < total; ++i) {
+        const int32_t original = target.dspark_batch_idxs[i];
+        if (original < 0 || (size_t) original >= total || inverse[original] != -1) {
+            throw std::runtime_error("DSpark feature batch mapping is not a permutation");
+        }
+        inverse[original] = (int32_t) i;
+    }
+    dspark_features.row_indices.assign(inverse.begin() + row_offset, inverse.begin() + row_offset + n_rows);
+    dspark_features.source_rows = total;
+    dspark_features.row_offset = row_offset;
+    dspark_features.n_rows = n_rows;
+}
+
+void llama_context::set_dspark_device_sampling(const float * uniforms, size_t count, float temperature) {
+    if (!cparams.dspark_device_sampling || !uniforms || count == 0 || count > cparams.n_ubatch ||
+        !std::isfinite(temperature) || temperature <= 0.0f) {
+        throw std::runtime_error("invalid DSpark device sampling parameters");
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (!std::isfinite(uniforms[i]) || uniforms[i] < 0.0f || uniforms[i] >= 1.0f) {
+            throw std::runtime_error("DSpark uniform must be in [0, 1)");
+        }
+    }
+    dspark_sampling.uniforms.assign(uniforms, uniforms + count);
+    dspark_sampling.inverse_temperature = 1.0f/temperature;
+}
+
+const llama_token * llama_context::get_dspark_device_tokens() {
+    synchronize();
+    GGML_ASSERT(cparams.dspark_device_sampling && !dspark_tokens.empty());
+    output_reorder();
+    return dspark_tokens.data();
+}
+
+const float * llama_context::get_dspark_device_probs(int32_t index) {
+    synchronize();
+    output_reorder();
+    const size_t vocab = model.vocab.n_tokens();
+    if (!cparams.dspark_device_sampling || index < 0 || (size_t) index >= dspark_probs.size()/vocab) {
+        throw std::runtime_error("DSpark device probability index out of range");
+    }
+    return dspark_probs.data() + (size_t) index*vocab;
+}
+
+const float * llama_dspark_device_get_probs(llama_context * draft, int32_t index) {
+    return draft->get_dspark_device_probs(index);
+}
+
+bool llama_dspark_device_init(llama_context * target, llama_context * draft) {
+    return draft->init_dspark_device(*target);
+}
+
+void llama_dspark_device_set_features(llama_context * target, llama_context * draft, size_t row_offset, size_t n_rows) {
+    draft->set_dspark_device_features(*target, row_offset, n_rows);
+}
+
+void llama_dspark_device_set_sampling(llama_context * draft, const float * uniforms, size_t count, float temperature) {
+    draft->set_dspark_device_sampling(uniforms, count, temperature);
+}
+
+const llama_token * llama_dspark_device_get_tokens(llama_context * draft) {
+    return draft->get_dspark_device_tokens();
+}
+
 void llama_context::set_dspark_probabilistic(bool value) {
     if (cparams.dspark_probabilistic != value) {
         cparams.dspark_probabilistic = value;
@@ -2165,6 +2309,17 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
             }
         }
 
+        if (res->t_dspark_tokens) {
+            auto * tokens = res->t_dspark_tokens;
+            dspark_tokens.resize(ggml_nelements(tokens));
+            auto * backend = ggml_backend_sched_get_tensor_backend(sched.get(), tokens);
+            ggml_backend_tensor_get_async(backend, tokens, dspark_tokens.data(), 0, ggml_nbytes(tokens));
+            auto * probs = res->t_dspark_probs;
+            dspark_probs.resize(ggml_nelements(probs));
+            backend = ggml_backend_sched_get_tensor_backend(sched.get(), probs);
+            ggml_backend_tensor_get_async(backend, probs, dspark_probs.data(), 0, ggml_nbytes(probs));
+        }
+
         // [TAG_EXTRACT_TARGET_EMBEDDINGS]
         bool extract_all_idxs = extract_layer_inputs(res, n_tokens_prev, ubatch.n_tokens);
 
@@ -2193,6 +2348,9 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
             GGML_ASSERT(embd_batch_idxs.size() == (size_t) n_tokens_prev);
             const auto & batch_idxs = ubatch.data->batch_idxs;
             embd_batch_idxs.insert(embd_batch_idxs.end(), batch_idxs.begin(), batch_idxs.end());
+            if (cparams.dspark_device_extract) {
+                dspark_batch_idxs = embd_batch_idxs;
+            }
         }
 
         if (has_samplers) {
@@ -2461,7 +2619,31 @@ bool llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
         ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), t);
         GGML_ASSERT(backend != nullptr);
         // Tensor-split backends require a zero source offset.
-        ggml_backend_tensor_get_async(backend, t, embd_layer_inp[il].data + dst_offset, 0, nbytes);
+        if (cparams.dspark_device_extract) {
+            GGML_ASSERT(t->type == GGML_TYPE_F32 && ggml_is_contiguous(t));
+            if (dspark_layers.size() <= il) {
+                dspark_layers.resize(il + 1);
+            }
+            auto & layer = dspark_layers[il];
+            if (!layer.tensor) {
+                layer.ctx.reset(ggml_init({ ggml_tensor_overhead(), nullptr, true }));
+                if (!layer.ctx) { throw std::runtime_error("DSpark feature metadata allocation failed"); }
+                layer.tensor = ggml_new_tensor_2d(layer.ctx.get(), GGML_TYPE_F32, t->ne[0], cparams.n_batch);
+                layer.backend = backend;
+                layer.buffer.reset(ggml_backend_alloc_ctx_tensors(layer.ctx.get(), backend));
+                if (!layer.buffer) { throw std::runtime_error("DSpark device feature allocation failed"); }
+            }
+            if (ggml_backend_buffer_get_type(t->buffer) != ggml_backend_buffer_get_type(layer.buffer.get())) {
+                throw std::runtime_error("DSpark features must reside on the selected GPU");
+            }
+            ggml_context_ptr views(ggml_init({ ggml_tensor_overhead(), nullptr, true }));
+            auto * dst = ggml_view_2d(views.get(), layer.tensor, t->ne[0], n_tokens, layer.tensor->nb[1], token_offset*layer.tensor->nb[1]);
+            ggml_backend_view_init(dst);
+            ggml_backend_tensor_copy_async(backend, backend, t, dst);
+            layer.valid_rows = token_offset + n_tokens;
+        } else {
+            ggml_backend_tensor_get_async(backend, t, embd_layer_inp[il].data + dst_offset, 0, nbytes);
+        }
         extracted = true;
     }
     return extracted;
@@ -2476,6 +2658,13 @@ void llama_context::output_reorder() {
         const uint64_t i0 = output_swaps[s].i0;
         const uint64_t i1 = output_swaps[s].i1;
 
+        if (cparams.dspark_device_sampling) {
+            GGML_ASSERT(i0 < dspark_tokens.size() && i1 < dspark_tokens.size());
+            std::swap(dspark_tokens[i0], dspark_tokens[i1]);
+            for (uint64_t k = 0; k < n_vocab; ++k) {
+                std::swap(dspark_probs[i0*n_vocab + k], dspark_probs[i1*n_vocab + k]);
+            }
+        }
         if (logits.size > 0) {
             for (uint64_t k = 0; k < n_vocab; k++) {
                 std::swap(logits.data[i0*n_vocab + k], logits.data[i1*n_vocab + k]);
@@ -2536,7 +2725,7 @@ void llama_context::output_reorder() {
                 }
             }
             for (auto & layer : embd_layer_inp) {
-                if (layer.has_data()) {
+                if (!cparams.dspark_device_extract && layer.has_data()) {
                     for (size_t k = 0; k < n_embd; ++k) {
                         std::swap(layer.data[i*n_embd + k], layer.data[j*n_embd + k]);
                     }

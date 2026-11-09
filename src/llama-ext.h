@@ -53,6 +53,14 @@ LLAMA_API quantize_state_impl * llama_quant_init(
 
 LLAMA_API void llama_quant_free(quantize_state_impl * qs);
 
+// Experimental single-sequence DSpark path. Probability vectors remain available for rejection verification.
+LLAMA_API bool llama_dspark_device_init(llama_context * target, llama_context * draft);
+LLAMA_API void llama_dspark_device_reset(llama_context * target, llama_context * draft);
+LLAMA_API void llama_dspark_device_set_features(llama_context * target, llama_context * draft, size_t row_offset, size_t n_rows);
+LLAMA_API void llama_dspark_device_set_sampling(llama_context * draft, const float * uniforms, size_t count, float temperature);
+LLAMA_API const llama_token * llama_dspark_device_get_tokens(llama_context * draft);
+LLAMA_API const float * llama_dspark_device_get_probs(llama_context * draft, int32_t index);
+
 // Descriptor for constructing a mock model for quantization testing.
 struct llama_quant_model_desc {
     const char * architecture;

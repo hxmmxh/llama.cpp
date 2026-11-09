@@ -1,0 +1,271 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-09",
+  "branch": "vulkan_opt",
+  "base_commit": "4d36b146147f30b3ce0e12d2b92547c079b63f75",
+  "source_manifest_sha256": "b97f34e41f4bd5ea4e29cf10243ba2ebda570e7e99bf6dd4b4c4e70480810aec",
+  "windows_runtime_manifest_sha256": "169eccc9ab961c342b7bfd07143c14dcd727ac9df9d7cfc03dd895b65ab12521",
+  "artifact_root": "../experiments/windows-cpu/windows_core_ultra_7_255h/20261109-110425-vulkan-branch-port",
+  "source_files": [
+    {
+      "path": "common/speculative-dspark.h",
+      "after_sha256": "9aa711c66fe802e391fdfe90f488bc541ae314c92df883aaa5c6dea0c557b59e"
+    },
+    {
+      "path": "common/speculative.cpp",
+      "after_sha256": "4a8ba741cbb74fabd52dd65092901f587b3a2b936a15ba3bb04204d4e2c87d71"
+    },
+    {
+      "path": "docs/cpu-hotspots-20261105.md",
+      "after_sha256": "4999cc5294391112ca265d4cbf585108b6baf4b2bbc658c2d374bc3d9a2320e7"
+    },
+    {
+      "path": "docs/cpu-hotspots-20261106.md",
+      "after_sha256": "43969e7d94cc0d8ae3c8742dd65966fc4f3d997af272c45f2a984c6ce28ca052"
+    },
+    {
+      "path": "docs/cpu-optimizations.md",
+      "after_sha256": "f68659a39ba8ccd483c534d7a4d2709d127f69a395392574694edac701be43cc"
+    },
+    {
+      "path": "docs/dspark-cpu-validation.json",
+      "after_sha256": "c1c51705569b567ddf21e7ebc62ec13649e98f8ad3142dc2d1c494e48e7c2652"
+    },
+    {
+      "path": "docs/dspark-cpu.md",
+      "after_sha256": "0d25e99917d7ea9a216ef39d2ebdc47313e2bf13a25af6d51893a35bfc5b0fcd"
+    },
+    {
+      "path": "docs/dspark-probability-validation.json",
+      "after_sha256": "60e61a87511f859e2d78afe94a18a567533d01828c075e07766ceb633f8a09c5"
+    },
+    {
+      "path": "docs/dspark-q8-20261104.json",
+      "after_sha256": "2c1f72ada813c2f14e6be07c3bdc3769c3a88872172191ccfd02828fbc5e581d"
+    },
+    {
+      "path": "docs/dspark-q8-20261104.md",
+      "after_sha256": "780f8a8dc36f9e6771a7d9a9e78daec7d50d09a869a4934f836cdb99c95d160a"
+    },
+    {
+      "path": "docs/dspark-q8-backbone-tensor-types.txt",
+      "after_sha256": "458e0e8547ea752bbf7719aeb51342b6a5c7b0782d3f7f1fc07588ec9cd26a8f"
+    },
+    {
+      "path": "docs/dspark-targetmix-tensor-types.txt",
+      "after_sha256": "800a96d95682fe0f6ef91087f909330a2e3f5ba187bf932ba729c5373aa5446c"
+    },
+    {
+      "path": "docs/q6-m8-20261105.md",
+      "after_sha256": "af4d6e5c3fcb44e74ec46a03ef52d0a358b4ba39de0bf9faf448d6aa95dd0f35"
+    },
+    {
+      "path": "docs/q8-multirow-20261105.md",
+      "after_sha256": "ce42f09645c94539928e126eb9417df64502a97dd242f3de6b1bb34db718ee68"
+    },
+    {
+      "path": "docs/q8-reuse43-20261105.md",
+      "after_sha256": "2cfd82171e32a5c59c06c7f7c05f19e07d36a1a7a5e25e916979ffc08cdda7ff"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/arch/arm/quants.c",
+      "after_sha256": "10345744d6236b87df949a51c0d26bf55a67da139d24744628a2c62f02b5cf89"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/arch/arm/repack.cpp",
+      "after_sha256": "c16a6ce3cc48081755163f81089cf9eabddf0b3b89278f56d260fb7c0f83d2b3"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/arch/arm/tail3-q4.inc",
+      "after_sha256": "2cffe0a7a001202bb67cc141d50cbd6f00169d68b0833ec375f10383a6d9227d"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/arch/arm/tail3-q6.inc",
+      "after_sha256": "dae00479b7940cd5d6408ccd892d23a3303f69444974e0e0b881f35db4a94393"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/arch/x86/repack.cpp",
+      "after_sha256": "880cb85026c29c76b34d292b19fc2320d7a578537dc2504bc8c1e439357bfc0e"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/ggml-cpu.c",
+      "after_sha256": "c4caaaf27e0768c0b34dd009c4073e5e3fca511bb99b68babf48781c8860e271"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/llamafile/sgemm.cpp",
+      "after_sha256": "78f1521dc8d121f4a307b716f2a536831e13d10f00e6279d0d2125703a7bd09d"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/ops.cpp",
+      "after_sha256": "9c69423c043d003a6037bbb5a3ab086ef7eec27ffeb76072a9bead9b902da0f3"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/q8-pv.h",
+      "after_sha256": "3689b649a2af7f1881a9f68a8ddebf8928f95ef34f77306207757965660aad8a"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/repack.cpp",
+      "after_sha256": "9cc3a4560e1abcd81059452f6b21611aee76af551d07347c150f287f35ace0a9"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/tiled/tiled-kernel.cpp",
+      "after_sha256": "524d9f1034bf330db9c635c015099237c51edaf8086688930df94855d2298855"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/tiled/tiled-kernel.h",
+      "after_sha256": "ab1a0b373a77130a30bbb823d365fc12b7ab25015267e95bc6e3e2b4fc8bc2a6"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/tiled/tiled.cpp",
+      "after_sha256": "b43f1e1469da457dc394ce250ec6c011e046ffc81b0ef77e4a5fa1f14e2c3a99"
+    },
+    {
+      "path": "ggml/src/ggml-cpu/vec.cpp",
+      "after_sha256": "203dc33ae4f1aece3fa7696132fb81ea6bbedf0d7ccaeee1ccb26546e06ce186"
+    },
+    {
+      "path": "src/llama-context.cpp",
+      "after_sha256": "38808a53d43877528697bde6a6d3a3bbb90203134f6e71ef0690886fd766f345"
+    },
+    {
+      "path": "src/llama-context.h",
+      "after_sha256": "ae9eca03b6b11f6cde3fe4d6065db19f73d5dbb35bddd75dd23db37996e576fc"
+    },
+    {
+      "path": "src/llama-cparams.h",
+      "after_sha256": "b98984f7b96702095ac5c20240f3ed44a304045623d9741eb8296aa55a9f669d"
+    },
+    {
+      "path": "src/llama-dspark-device.h",
+      "after_sha256": "328ea89a5604dbcaf4489858c7b94949851dde31265a7781b48aba783d044e35"
+    },
+    {
+      "path": "src/llama-ext.h",
+      "after_sha256": "5af8c098ca8f47f42ef1168787178a0eadd9dfaef9781b23c5da911f91aaa0cc"
+    },
+    {
+      "path": "src/llama-graph.cpp",
+      "after_sha256": "024e5f8c6fbb32d12dd7a29013e8361dd1607b8b05980e7333a92510252cd6cb"
+    },
+    {
+      "path": "src/llama-graph.h",
+      "after_sha256": "a36ba592030e09b87201f3c1a894d1396bbf17e13db2bbb6c22210e8579f5fdc"
+    },
+    {
+      "path": "src/llama-model-loader.cpp",
+      "after_sha256": "7e1fcff2745a3c28977ccaca15a5e9e267034799ccfc9e82106416beaa76deee"
+    },
+    {
+      "path": "src/llama-sampler.cpp",
+      "after_sha256": "d33729d100ece7ab8c66f4b4cd8ad12660f4bebc8dea71fe569794b7d92df486"
+    },
+    {
+      "path": "src/models/dflash.cpp",
+      "after_sha256": "6d4a9c330bd3932ea6d9f10b6695df585ac995917632f90cb458cca5d780f6d8"
+    },
+    {
+      "path": "tests/CMakeLists.txt",
+      "after_sha256": "423a90154736547f7619e78a8e471ec64dd3b0ed0d9f298fd1d27af90dac43ea"
+    },
+    {
+      "path": "tests/test-backend-ops.cpp",
+      "after_sha256": "f06eb859283e20a3323a60bf816a550d0aa79af9bd5e44b5ac01abe36c6fea1e"
+    },
+    {
+      "path": "tests/test-dspark-device.cpp",
+      "after_sha256": "c403a4d8f36c8395773c65e6745629b6d1c3862accfb4ce69192346b439e97ff"
+    },
+    {
+      "path": "tests/test-quantize-fns.cpp",
+      "after_sha256": "0c3f01be6264fe22f7146f43c218a554cd6a50384d313425c2098621349eaa72"
+    },
+    {
+      "path": "tests/test-sampling.cpp",
+      "after_sha256": "c35b61b913ae92fd3ff8a2c84d5f8dd843ae760f3783f471925daccc38cf12b3"
+    },
+    {
+      "path": "tests/test-speculative-dspark.cpp",
+      "after_sha256": "4a8bb9e3534dfa75bacba530c7ab05050e7e79f33c643caf79457036e43e9dd0"
+    }
+  ],
+  "validation": {
+    "local_cpu": {
+      "passed": true,
+      "ctest_entries": 5,
+      "includes": [
+        "test-sampling",
+        "test-speculative-dspark",
+        "test-generate-speculative-target",
+        "test-speculative-rejection-sampling",
+        "test-dspark-device"
+      ]
+    },
+    "windows_build": {
+      "passed": true,
+      "initial_build_configuration_failure": "Removed test-sampling from native target list because this platform excludes it; source unchanged"
+    },
+    "windows_units": [
+      {
+        "args": "Vulkan0",
+        "exe": "C:\\Users\\yaozhang21\\cpu-infer\\runs\\20261109-110425-vulkan-branch-port\\build-vulkan\\bin\\test-dspark-device.exe",
+        "name": "test-dspark-device",
+        "sha256": "0961428836ed625a88c534f6e530fe03da71ec3660e20829356da0944e719709",
+        "exit_code": 0
+      },
+      {
+        "args": "",
+        "exe": "C:\\Users\\yaozhang21\\cpu-infer\\runs\\20261109-110425-vulkan-branch-port\\build-vulkan\\bin\\test-speculative-dspark.exe",
+        "name": "test-speculative-dspark",
+        "sha256": "4a23fff5cc8017638356f943b6b7e7782af40f0991adea0d349d7ad397570187",
+        "exit_code": 0
+      }
+    ],
+    "generation": {
+      "passed": true,
+      "cases": [
+        0,
+        4
+      ],
+      "output_budget": 512,
+      "reference_run": "20261108-210139-vulkan-dspark-profile",
+      "reference_phase": "fa512-quality-r1",
+      "phase": "port-fa-validation-r1",
+      "environment": {
+        "LLAMA_DSPARK_DEVICE": "1",
+        "LLAMA_DSPARK_DEVICE_VALIDATE": "1",
+        "GGML_VK_DISABLE_COOPMAT": "1"
+      },
+      "flash_attention": "on",
+      "draft_max": 7,
+      "identical_tokens": true,
+      "identical_proposal_acceptance_counts": true,
+      "output_tokens": 488,
+      "decode_tokens": 486,
+      "proposed": 798,
+      "accepted": 374,
+      "rounds": 114,
+      "server_exit_code": 0,
+      "scope": "Correctness with CDF validation enabled; not a clean throughput benchmark"
+    },
+    "loaded_modules_from_own_build": true,
+    "runtime_post_hash_verified": true,
+    "models_post_hash_verified": true
+  },
+  "historical_best": {
+    "decode_tok_s": 32.8622008355,
+    "samples": 38,
+    "max_output_tokens": 512,
+    "quality_correct": 30,
+    "reference_fa_off_correct": 32,
+    "config": "DSpark Q8, FA on, draft max 7",
+    "run_id": "20261108-210139-vulkan-dspark-profile",
+    "phase": "fa38-r1",
+    "is_integrated_branch_full_benchmark": false
+  },
+  "limits": [
+    "GPU path remains opt-in, single-sequence/full-vocabulary/same-GPU/anchor-first only.",
+    "Target rejection verification remains on CPU.",
+    "No rejected MMVQ shader variants or profiler hooks are included.",
+    "38-question historical throughput does not establish quality equivalence or integrated-branch throughput."
+  ]
+}

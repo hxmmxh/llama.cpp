@@ -67,6 +67,30 @@ static bool can_reuse_kq_mask(
 
 // impl
 
+void llm_graph_input_dspark_sampling::set_input(const llama_ubatch * ubatch) {
+    if (state->uniforms.empty()) {
+        // Context capability probes run before a request supplies its random draws.
+        std::vector<float> probe(ubatch->n_tokens, 0.5f);
+        ggml_backend_tensor_set(uniforms, probe.data(), 0, ggml_nbytes(uniforms));
+    } else {
+        GGML_ASSERT(state->uniforms.size() == (size_t) ubatch->n_tokens);
+        ggml_backend_tensor_set(uniforms, state->uniforms.data(), 0, ggml_nbytes(uniforms));
+    }
+    ggml_backend_tensor_set(inverse_temperature, &state->inverse_temperature, 0, sizeof(float));
+}
+
+void llm_graph_input_dspark_features::set_input(const llama_ubatch * ubatch) {
+    GGML_ASSERT(state->layers.size() == layers.size() && state->n_rows == (size_t) ubatch->n_tokens);
+    ggml_backend_tensor_set(indices, state->row_indices.data(), 0, ggml_nbytes(indices));
+    ggml_context_ptr views(ggml_init({ layers.size()*ggml_tensor_overhead(), nullptr, true }));
+    GGML_ASSERT(views);
+    for (size_t k = 0; k < layers.size(); ++k) {
+        auto * dst = ggml_view_2d(views.get(), layers[k], layers[k]->ne[0], state->source_rows, layers[k]->nb[1], 0);
+        ggml_backend_view_init(dst);
+        llama_dspark_copy_feature_rows(state->backend, state->layers[k], dst, 0);
+    }
+}
+
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
         const int64_t n_tokens = ubatch->n_tokens;
@@ -1397,6 +1421,8 @@ void llm_graph_result::reset() {
     t_inp_tokens  = nullptr;
     t_inp_embd    = nullptr;
     t_logits      = nullptr;
+    t_dspark_tokens = nullptr;
+    t_dspark_probs = nullptr;
     t_embd        = nullptr;
     t_embd_pooled = nullptr;
     t_h_nextn     = nullptr;
@@ -1435,6 +1461,10 @@ void llm_graph_result::set_inputs(const llama_ubatch * ubatch) {
 }
 
 void llm_graph_result::set_outputs(const llm_graph_params & params) {
+    if (t_dspark_tokens != nullptr) {
+        ggml_set_output(t_dspark_tokens);
+        ggml_set_output(t_dspark_probs);
+    }
     if (t_logits != nullptr) {
         ggml_set_output(t_logits);
     }

@@ -131,6 +131,24 @@ protected:
 
 using llm_graph_input_ptr = std::unique_ptr<llm_graph_input_i>;
 
+class llm_graph_input_dspark_sampling : public llm_graph_input_i {
+public:
+    explicit llm_graph_input_dspark_sampling(const llama_dspark_device_sampling * state) : state(state) {}
+    void set_input(const llama_ubatch * ubatch) override;
+    const llama_dspark_device_sampling * state;
+    ggml_tensor * uniforms = nullptr;
+    ggml_tensor * inverse_temperature = nullptr;
+};
+
+class llm_graph_input_dspark_features : public llm_graph_input_i {
+public:
+    explicit llm_graph_input_dspark_features(const llama_dspark_device_features * state) : state(state) {}
+    void set_input(const llama_ubatch * ubatch) override;
+    const llama_dspark_device_features * state;
+    std::vector<ggml_tensor *> layers;
+    ggml_tensor * indices = nullptr;
+};
+
 class llm_graph_input_embd : public llm_graph_input_i {
 public:
     llm_graph_input_embd(int64_t n_embd) : n_embd(n_embd) {}
@@ -874,6 +892,11 @@ struct llm_graph_params {
             return false;
         }
 
+        if (cparams.dspark_device_sampling != other.cparams.dspark_device_sampling ||
+            cparams.dspark_device_features != other.cparams.dspark_device_features ||
+            cparams.dspark_device_extract != other.cparams.dspark_device_extract) {
+            return false;
+        }
         if (cparams.dspark_probabilistic != other.cparams.dspark_probabilistic) {
             return false;
         }
@@ -967,6 +990,8 @@ public:
     ggml_tensor * t_inp_tokens  = nullptr;
     ggml_tensor * t_inp_embd    = nullptr; // [n_embd_inp, n_tokens]
     ggml_tensor * t_logits      = nullptr;
+    ggml_tensor * t_dspark_tokens = nullptr;
+    ggml_tensor * t_dspark_probs = nullptr;
     ggml_tensor * t_embd        = nullptr;
     ggml_tensor * t_embd_pooled = nullptr;
     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm

@@ -93,6 +93,13 @@ struct llama_context {
 
     float * get_embeddings_layer_inp(uint32_t lid);
 
+    bool init_dspark_device(llama_context & target);
+    void reset_dspark_device(llama_context & target);
+    void set_dspark_device_features(llama_context & target, size_t row_offset, size_t n_rows);
+    void set_dspark_device_sampling(const float * uniforms, size_t count, float temperature);
+    const llama_token * get_dspark_device_tokens();
+    const float * get_dspark_device_probs(int32_t index);
+
     llama_token * get_sampled_tokens() const;
     llama_token   get_sampled_token_ith(int32_t idx);
 
@@ -302,6 +309,19 @@ private:
 
     bool spark_decode_graph = false;
     llama_cparams cparams;
+    llama_dspark_device_sampling dspark_sampling;
+    llama_dspark_device_features dspark_features;
+    std::vector<llama_token> dspark_tokens;
+    std::vector<float> dspark_probs;
+    struct dspark_layer_buffer {
+        ggml_context_ptr ctx;
+        ggml_backend_buffer_ptr buffer;
+        ggml_tensor * tensor = nullptr;
+        ggml_backend_t backend = nullptr;
+        size_t valid_rows = 0;
+    };
+    std::vector<dspark_layer_buffer> dspark_layers;
+    std::vector<int32_t> dspark_batch_idxs;
 
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;

@@ -408,8 +408,13 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model & 
     ggml_tensor * base = res->t_logits; // [n_vocab, n_tokens]
     const int64_t n_vocab = base->ne[0];
     const int64_t n_tok   = base->ne[1];
+    int device_node_begin = 0;
+    if (g.cparams.dspark_device_sampling) {
+        ggml_build_forward_expand(g.gf, base);
+        device_node_begin = ggml_graph_n_nodes(g.gf);
+    }
 
-    if (g.cparams.dspark_probabilistic) {
+    if (g.cparams.dspark_probabilistic && !g.cparams.dspark_device_sampling) {
         res->t_logits = base;
         ggml_build_forward_expand(g.gf, base);
         return;
@@ -442,6 +447,20 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model & 
 
     ggml_tensor * cat      = nullptr;
     ggml_tensor * cat_conf = nullptr;
+    ggml_tensor * cat_tokens = nullptr;
+    llm_graph_input_dspark_sampling * device_sampling = nullptr;
+    if (g.cparams.dspark_device_sampling) {
+        GGML_ASSERT(n_blocks == 1 && sample_from_anchor && !model.d2t);
+        auto inp = std::make_unique<llm_graph_input_dspark_sampling>(g.cparams.dspark_device_sampling);
+        inp->uniforms = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_tok);
+        inp->inverse_temperature = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+        ggml_set_input(inp->uniforms);
+        ggml_set_input(inp->inverse_temperature);
+        ggml_backend_sched_set_tensor_backend(g.sched, inp->uniforms, g.cparams.dspark_device_sampling->backend);
+        ggml_backend_sched_set_tensor_backend(g.sched, inp->inverse_temperature, g.cparams.dspark_device_sampling->backend);
+        device_sampling = inp.get();
+        res->add_input(std::move(inp));
+    }
 
     if (!sample_from_anchor) {
         // bonus anchor slot: pass the logits through unbiased, pad the (unread) confidence column
@@ -470,9 +489,17 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model & 
         ggml_tensor * base_i = ggml_view_2d(ctx0, base, n_vocab, n_blocks, base_stride, i*base->nb[1]);
         ggml_tensor * col    = ggml_add(ctx0, base_i, bias);
 
+        if (device_sampling) {
+            auto * scaled = ggml_mul(ctx0, col, device_sampling->inverse_temperature);
+            auto * probs = ggml_soft_max(ctx0, scaled);
+            auto * uniform = ggml_view_1d(ctx0, device_sampling->uniforms, 1, i*sizeof(float));
+            prev = llama_dspark_sample_probs(ctx0, probs, uniform);
+            cat_tokens = cat_tokens ? ggml_concat(ctx0, cat_tokens, prev, 0) : prev;
+            col = probs;
+        }
         cat = cat ? ggml_concat(ctx0, cat, col, 1) : col;
 
-        if (has_conf) {
+        if (has_conf && !device_sampling) {
             // confidence head input: predicts per-position acceptance
             ggml_tensor * conf_inp   = res->t_embd; // [n_embd, n_tok]
             // conf(i) = sigmoid(conf_proj . [conf_inp(i); markov_w1[prev(i)]] + b)  -- [1, n_blocks]
@@ -488,7 +515,7 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model & 
             cat_conf = cat_conf ? ggml_concat(ctx0, cat_conf, conf, 1) : conf;
         }
 
-        if (i + 1 < block_drafts) {
+        if (!device_sampling && i + 1 < block_drafts) {
             prev = ggml_argmax(ctx0, col);
         }
     }
@@ -498,7 +525,7 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model & 
     out = ggml_cont(ctx0, ggml_permute(ctx0, out, 0, 2, 1, 3)); // [n_vocab, block_drafts, n_blocks]
     out = ggml_reshape_2d(ctx0, out, n_vocab, n_tok);
 
-    if (has_conf) {
+    if (has_conf && !device_sampling) {
         ggml_tensor * conf = ggml_reshape_3d(ctx0, cat_conf, 1, n_blocks, block_drafts);
         conf = ggml_cont(ctx0, ggml_permute(ctx0, conf, 0, 2, 1, 3));
         conf = ggml_reshape_2d(ctx0, conf, 1, n_tok);
@@ -509,8 +536,29 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model & 
         ggml_build_forward_expand(g.gf, conf);
     }
 
-    res->t_logits = out;
+    if (device_sampling) {
+        res->t_dspark_tokens = cat_tokens;
+        ggml_build_forward_expand(g.gf, cat_tokens);
+    }
+    if (device_sampling) {
+        res->t_dspark_probs = out;
+        res->t_logits = nullptr;
+    } else {
+        res->t_logits = out;
+    }
     ggml_build_forward_expand(g.gf, out);
+    if (device_sampling) {
+        auto * backend = g.cparams.dspark_device_sampling->backend;
+        for (int i = device_node_begin; i < ggml_graph_n_nodes(g.gf); ++i) {
+            auto * node = ggml_graph_node(g.gf, i);
+            if (!ggml_backend_supports_op(backend, node)) {
+                throw std::runtime_error(std::string("DSpark GPU sampling unsupported op: ") + ggml_op_name(node->op));
+            }
+            if (!node->view_src) {
+                ggml_backend_sched_set_tensor_backend(g.sched, node, backend);
+            }
+        }
+    }
 }
 
 static void build_dspark_block_mask(llm_graph_context & g, ggml_tensor *& mask) {
@@ -897,15 +945,36 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
     // KV cache injection
     ASSERT_EMBD_OR_TOKEN(ubatch);
     if (ubatch.embd) {
-        auto inp = std::make_unique<llm_graph_input_embd>(n_embd_inp);
-
-        inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_inp, n_tokens);
-        ggml_set_input(inp->embd);
-
-        ggml_tensor * inp_target = inp->embd;
+        ggml_tensor * inp_target = nullptr;
+        if (cparams.dspark_device_features) {
+            auto inp = std::make_unique<llm_graph_input_dspark_features>(cparams.dspark_device_features);
+            const size_t n_layers = model.target_layer_ids.size();
+            GGML_ASSERT(n_layers > 0 && n_embd_inp % n_layers == 0);
+            inp->indices = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+            ggml_set_input(inp->indices);
+            for (size_t k = 0; k < n_layers; ++k) {
+                auto * layer = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_inp/n_layers, cparams.dspark_device_features->capacity);
+                ggml_set_input(layer);
+                ggml_backend_sched_set_tensor_backend(sched, layer, cparams.dspark_device_features->backend);
+                inp->layers.push_back(layer);
+                auto * selected = ggml_get_rows(ctx0, layer, inp->indices);
+                inp_target = inp_target ? ggml_concat(ctx0, inp_target, selected, 0) : selected;
+                if (!ggml_backend_supports_op(cparams.dspark_device_features->backend, selected) ||
+                    !ggml_backend_supports_op(cparams.dspark_device_features->backend, inp_target)) {
+                    throw std::runtime_error("DSpark GPU feature gather/concat not supported");
+                }
+                ggml_backend_sched_set_tensor_backend(sched, selected, cparams.dspark_device_features->backend);
+                ggml_backend_sched_set_tensor_backend(sched, inp_target, cparams.dspark_device_features->backend);
+            }
+            res->add_input(std::move(inp));
+        } else {
+            auto inp = std::make_unique<llm_graph_input_embd>(n_embd_inp);
+            inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_inp, n_tokens);
+            ggml_set_input(inp->embd);
+            inp_target = inp->embd;
+            res->add_input(std::move(inp));
+        }
         cb(inp_target, "inp_target_features", -1);
-
-        res->add_input(std::move(inp));
 
         // fuse the target features through the encoder
         if (model.fc_norm) {

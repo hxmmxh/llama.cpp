@@ -1027,6 +1027,12 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     // dspark speculators
     bool sample_from_anchor = true;
     bool dspark_probabilistic = false;
+    bool dspark_device = false;
+    std::mt19937 dspark_device_rng;
+    uint32_t dspark_device_seed = LLAMA_DEFAULT_SEED;
+    bool dspark_device_reseed = true;
+    std::vector<float> dspark_device_uniforms;
+    bool dspark_device_validate = std::getenv("LLAMA_DSPARK_DEVICE_VALIDATE") != nullptr;
     int32_t dspark_markov_rank = 0;
     int32_t dspark_markov_vocab = 0;
     std::vector<float> dspark_markov_w1;
@@ -1079,23 +1085,29 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 throw std::runtime_error("probabilistic DSpark Markov ranks do not match");
             }
             dspark_markov_vocab = n_vocab;
-            dspark_markov_w1.resize(n_w1);
-            std::vector<float> dspark_markov_w2(n_w2);
-            llama_model_get_dspark_markov_w1(model_dft, dspark_markov_w1.data());
-            llama_model_get_dspark_markov_w2(model_dft, dspark_markov_w2.data());
-            auto cpu = this->params.cpuparams;
-            cpu.n_threads = llama_n_threads(ctx_dft);
-            dspark_markov.reset(new common_speculative_dspark_markov(
-                dspark_markov_w2, dspark_markov_rank, dspark_markov_vocab, cpu, &dspark_markov_w1));
-            if (dspark_markov->w1_cache_bytes() != 0) {
-                std::vector<float>().swap(dspark_markov_w1);
-                LOG_INF("%s: probabilistic DSpark W1 cache: Q8_0, %zu bytes, F32 capacity %zu\n", __func__,
-                        dspark_markov->w1_cache_bytes(), dspark_markov_w1.capacity());
+            const char * device_env = std::getenv("LLAMA_DSPARK_DEVICE");
+            dspark_device = device_env && std::strcmp(device_env, "1") == 0;
+            if (dspark_device) {
+                llama_dspark_device_init(ctx_tgt, ctx_dft);
+            } else {
+                dspark_markov_w1.resize(n_w1);
+                std::vector<float> dspark_markov_w2(n_w2);
+                llama_model_get_dspark_markov_w1(model_dft, dspark_markov_w1.data());
+                llama_model_get_dspark_markov_w2(model_dft, dspark_markov_w2.data());
+                auto cpu = this->params.cpuparams;
+                cpu.n_threads = llama_n_threads(ctx_dft);
+                dspark_markov.reset(new common_speculative_dspark_markov(
+                    dspark_markov_w2, dspark_markov_rank, dspark_markov_vocab, cpu, &dspark_markov_w1));
+                if (dspark_markov->w1_cache_bytes() != 0) {
+                    std::vector<float>().swap(dspark_markov_w1);
+                    LOG_INF("%s: probabilistic DSpark W1 cache: Q8_0, %zu bytes, F32 capacity %zu\n", __func__,
+                            dspark_markov->w1_cache_bytes(), dspark_markov_w1.capacity());
+                }
+                LOG_INF("%s: probabilistic DSpark Markov W2 path: %s\n", __func__,
+                        dspark_markov->uses_integer_dot() ? "Q8_0 integer dot" : "FP32 fallback");
+                LOG_INF("%s: probabilistic DSpark uses CPU sampling and Markov weights, backend sampling disabled\n", __func__);
             }
-            LOG_INF("%s: probabilistic DSpark Markov W2 path: %s\n", __func__,
-                    dspark_markov->uses_integer_dot() ? "Q8_0 integer dot" : "FP32 fallback");
             llama_set_dspark_probabilistic(ctx_dft, true);
-            LOG_INF("%s: probabilistic DSpark uses CPU sampling and Markov weights, backend sampling disabled\n", __func__);
         }
 
         target_layer_ids   = llama_model_target_layer_ids  (model_dft);
@@ -1208,6 +1220,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         auto * ctx_dft = this->params.ctx_dft;
         if (ctx_dft && dspark_probabilistic) {
             llama_set_dspark_probabilistic(ctx_dft, false);
+            if (dspark_device) {
+                llama_dspark_device_reset(this->params.ctx_tgt, ctx_dft);
+            }
         }
         for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) backend_chains.size(); ++seq_id) {
             if (backend_chains[seq_id] == nullptr) {
@@ -1230,6 +1245,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             smpls_cfg[seq_id].temp = NAN;
         }
 
+        dspark_device_reseed = true;
         // reseed per request rather than per round, or two identical requests differ
         dflash2_seed[seq_id] = -1;
 
@@ -1301,7 +1317,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 // gather target features per extract layer; the fused decode encodes and
                 // injects them into the K/V cache at the target positions
                 features_buf.resize((size_t) n_chunk * n_embd_enc);
-                for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
+                if (dspark_device) {
+                    llama_dspark_device_set_features(ctx_tgt, ctx_dft, i_batch_beg[seq_id] + offset, n_chunk);
+                }
+                for (uint32_t k = 0; !dspark_device && k < target_layer_ids_n; ++k) {
                     const float * layer = llama_get_embeddings_layer_inp(ctx_tgt, (uint32_t) target_layer_ids[k]);
                     if (!layer) {
                         GGML_ABORT("DFlash: target layer %d input not extracted.", target_layer_ids[k]);
@@ -1365,7 +1384,23 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 continue;
             }
 
-            if (dspark_probabilistic) {
+            if (dspark_device) {
+                if (!dp.result_q || dp.temp <= 0.0f || n_seq != 1) {
+                    throw std::runtime_error("device DSpark requires probabilistic single-sequence decoding");
+                }
+                if (dspark_device_reseed || dspark_device_seed != dp.seed) {
+                    dspark_device_seed = dp.seed;
+                    dspark_device_rng.seed(dp.seed == LLAMA_DEFAULT_SEED ? std::random_device{}() : dp.seed ^ 0x85ebca6bu);
+                    dspark_device_reseed = false;
+                }
+                std::uniform_real_distribution<double> uniform(0.0, 1.0);
+                std::vector<float> values(params.n_max);
+                for (auto & value : values) {
+                    value = std::min((float) uniform(dspark_device_rng), std::nextafter(1.0f, 0.0f));
+                }
+                dspark_device_uniforms = values;
+                llama_dspark_device_set_sampling(ctx_dft, values.data(), values.size(), dp.temp);
+            } else if (dspark_probabilistic) {
                 // Keep one random stream per request, including across verification rounds.
                 spec_retune(smpls, smpls_cfg, llama_get_model(ctx_dft), seq_id,
                         dp.result_q ? dp.temp : 0.0f, dp.seed, true);
@@ -1491,6 +1526,38 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     result.clear();
                     if (sample) {
                         dp.result_q->clear();
+                    }
+                }
+                continue;
+            }
+
+            if (dspark_device) {
+                const auto * ids = llama_dspark_device_get_tokens(ctx_dft);
+                for (int32_t i = 0; i < n_block_tokens; ++i) {
+                    const int32_t idx = beg + i;
+                    const float * probs = llama_dspark_device_get_probs(ctx_dft, idx);
+                    const llama_token id = ids[idx];
+                    if (id < 0 || id >= dspark_markov_vocab || !std::isfinite(probs[id]) || probs[id] <= 0.0f) {
+                        throw std::runtime_error("invalid DSpark device sample");
+                    }
+                    if (dspark_device_validate) {
+                        double sum = 0.0, prefix = 0.0;
+                        for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
+                            if (!std::isfinite(probs[token]) || probs[token] < 0.0f) {
+                                throw std::runtime_error("DSpark device probability validation failed");
+                            }
+                            sum += probs[token];
+                            if (token < id) { prefix += probs[token]; }
+                        }
+                        const float u = dspark_device_uniforms.at(idx);
+                        if (std::abs(sum - 1.0) > 2e-5 || u < prefix - 2e-6 || u > prefix + probs[id] + 2e-6) {
+                            throw std::runtime_error("DSpark device CDF validation failed");
+                        }
+                    }
+                    result.push_back(id);
+                    auto & q = dp.result_q->emplace_back(dspark_markov_vocab);
+                    for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
+                        q[token] = { token, 0.0f, probs[token] };
                     }
                 }
                 continue;
