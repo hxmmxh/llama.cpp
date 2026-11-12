@@ -4,6 +4,7 @@
 #include "common.h"
 
 struct common_speculative;
+struct common_sampler_draft_probs;
 
 // comma separated list the provided types
 std::string common_speculative_type_name_str(const std::vector<enum common_speculative_type> & types);
@@ -79,6 +80,9 @@ struct common_speculative_draft_params {
     // the target's temp and seed, read only when the drafter samples probabilistically
     float    temp = 1.0f;
     uint32_t seed = LLAMA_DEFAULT_SEED;
+
+    // Optional owning dense output, used only by device DSpark when explicitly enabled.
+    common_sampler_draft_probs * result_q_dense = nullptr;
 };
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);

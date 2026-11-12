@@ -34,6 +34,23 @@
 
 struct common_sampler;
 
+// Dense draft probabilities in token-id order. Clearing rows retains the allocation.
+struct common_sampler_draft_probs {
+    void resize(size_t rows, size_t vocab);
+    void truncate(size_t rows);
+    void clear() { n_rows = 0; }
+    bool empty() const { return n_rows == 0; }
+    size_t size() const { return n_rows; }
+    size_t vocab_size() const { return n_vocab; }
+    float * row(size_t index);
+    const float * row(size_t index) const;
+
+private:
+    std::vector<float> storage;
+    size_t n_rows = 0;
+    size_t n_vocab = 0;
+};
+
 // llama_sampler API overloads
 
 // note: can mutate params in some cases
@@ -91,6 +108,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
 
 // as above, but verifies by rejection sampling; draft_q holds the draft's candidates per token
 std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const std::vector<std::vector<llama_token_data>> & draft_q, bool grammar_first = false);
+std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const common_sampler_draft_probs & draft_q, bool grammar_first = false);
 
 // assume idxs == [ 0, 1, 2, ..., draft.size() ]
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first = false);

@@ -1028,6 +1028,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     bool sample_from_anchor = true;
     bool dspark_probabilistic = false;
     bool dspark_device = false;
+    bool dspark_dense_q = false;
     std::mt19937 dspark_device_rng;
     uint32_t dspark_device_seed = LLAMA_DEFAULT_SEED;
     bool dspark_device_reseed = true;
@@ -1089,6 +1090,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             dspark_device = device_env && std::strcmp(device_env, "1") == 0;
             if (dspark_device) {
                 llama_dspark_device_init(ctx_tgt, ctx_dft);
+                const char * dense_q_env = std::getenv("LLAMA_DSPARK_DENSE_Q");
+                dspark_dense_q = dense_q_env && std::strcmp(dense_q_env, "1") == 0;
             } else {
                 dspark_markov_w1.resize(n_w1);
                 std::vector<float> dspark_markov_w2(n_w2);
@@ -1533,6 +1536,10 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             if (dspark_device) {
                 const auto * ids = llama_dspark_device_get_tokens(ctx_dft);
+                const bool use_dense_q = dspark_dense_q && dp.result_q_dense;
+                if (use_dense_q) {
+                    dp.result_q_dense->resize(n_block_tokens, dspark_markov_vocab);
+                }
                 for (int32_t i = 0; i < n_block_tokens; ++i) {
                     const int32_t idx = beg + i;
                     const float * probs = llama_dspark_device_get_probs(ctx_dft, idx);
@@ -1555,9 +1562,13 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                         }
                     }
                     result.push_back(id);
-                    auto & q = dp.result_q->emplace_back(dspark_markov_vocab);
-                    for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
-                        q[token] = { token, 0.0f, probs[token] };
+                    if (use_dense_q) {
+                        std::memcpy(dp.result_q_dense->row(i), probs, (size_t) dspark_markov_vocab*sizeof(float));
+                    } else {
+                        auto & q = dp.result_q->emplace_back(dspark_markov_vocab);
+                        for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
+                            q[token] = { token, 0.0f, probs[token] };
+                        }
                     }
                 }
                 continue;
@@ -3134,6 +3145,9 @@ void common_speculative_draft(common_speculative * spec) {
             GGML_ASSERT(!dp.drafting || dp.result->empty());
 
             if (dp.drafting) {
+                if (dp.result_q_dense) {
+                    dp.result_q_dense->clear();
+                }
                 n_drafting++;
             }
         }
@@ -3173,6 +3187,9 @@ void common_speculative_draft(common_speculative * spec) {
                         // trim the candidates only if the drafter produced them (n-gram drafters do not)
                         if (dp.result_q && !dp.result_q->empty()) {
                             dp.result_q->resize(dp.n_max);
+                        }
+                        if (dp.result_q_dense && !dp.result_q_dense->empty()) {
+                            dp.result_q_dense->truncate(dp.n_max);
                         }
                     }
                 }

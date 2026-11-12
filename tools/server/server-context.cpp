@@ -295,6 +295,7 @@ struct server_slot {
 
     // draft candidates per token in spec_draft; only draft-simple and draft-mtp fill it
     std::vector<std::vector<llama_token_data>> spec_draft_q;
+    common_sampler_draft_probs spec_draft_q_dense;
     llama_tokens spec_prompt;
     std::vector<int32_t> spec_i_batch;
     common_prompt_checkpoint spec_ckpt;
@@ -3762,6 +3763,7 @@ private:
 
                     // stale candidates: a replay never reads them, a new draft refills them
                     slot.spec_draft_q.clear();
+                    slot.spec_draft_q_dense.clear();
 
                     if (!slot.spec_draft.empty()) {
                         // we have a previous (partial) draft to reuse
@@ -3794,6 +3796,7 @@ private:
                             /* .result_q = */ spec_reject ? &slot.spec_draft_q : nullptr,
                             /* .temp     = */ slot.task->params.sampling.temp,
                             /* .seed     = */ slot.task->params.sampling.seed,
+                            /* .result_q_dense = */ spec_reject ? &slot.spec_draft_q_dense : nullptr,
                         };
 
                         drafting.push_back(&slot);
@@ -4831,10 +4834,12 @@ private:
 
                 GGML_ASSERT(spec_i_batch.size() == n_draft + 1);
                 GGML_ASSERT(slot.spec_draft_q.empty() || (slot.spec_draft_q.size() == slot.spec_draft.size()));
+                GGML_ASSERT(slot.spec_draft_q_dense.empty() || slot.spec_draft_q_dense.size() == slot.spec_draft.size());
+                GGML_ASSERT(slot.spec_draft_q_dense.empty() || slot.spec_draft_q.empty());
                 const auto & synth_probs = common_speculative_get_synth_probs(spec.get());
 
                 // drafters that fill no distribution fall back here
-                const bool use_rejection = slot.use_spec_rejection() && !slot.spec_draft_q.empty();
+                const bool use_rejection = slot.use_spec_rejection() && (!slot.spec_draft_q.empty() || !slot.spec_draft_q_dense.empty());
 
                 std::vector<llama_token> accepted;
                 if (!synth_probs.empty()) {
@@ -4845,7 +4850,11 @@ private:
                 } else if (slot.spec_is_replay && slot.use_spec_rejection()) {
                     accepted = server_accept_replay(slot.smpl.get(), slot.ctx_tgt, spec_i_batch, slot.spec_draft);
                 } else if (use_rejection) {
-                    accepted = common_sampler_sample_and_accept_n_rejection(slot.smpl.get(), slot.ctx_tgt, spec_i_batch, slot.spec_draft, slot.spec_draft_q);
+                    if (!slot.spec_draft_q_dense.empty()) {
+                        accepted = common_sampler_sample_and_accept_n_rejection(slot.smpl.get(), slot.ctx_tgt, spec_i_batch, slot.spec_draft, slot.spec_draft_q_dense);
+                    } else {
+                        accepted = common_sampler_sample_and_accept_n_rejection(slot.smpl.get(), slot.ctx_tgt, spec_i_batch, slot.spec_draft, slot.spec_draft_q);
+                    }
                 } else {
                     accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, spec_i_batch, slot.spec_draft);
                 }

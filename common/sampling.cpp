@@ -124,6 +124,7 @@ struct common_sampler {
 
     // for rejection sampling; independent of the draft, or the target distribution is not preserved
     std::mt19937 rng;
+    bool dense_q_logged = false;
 
     void reset() {
         prev.clear();
@@ -759,12 +760,46 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
     return result;
 }
 
+void common_sampler_draft_probs::resize(size_t rows, size_t vocab) {
+    if (vocab == 0 || vocab > INT32_MAX || rows > storage.max_size()/vocab) {
+        throw std::length_error("invalid dense draft probability dimensions");
+    }
+    const size_t count = rows*vocab;
+    if (storage.size() < count) {
+        storage.resize(count);
+    }
+    n_vocab = vocab;
+    n_rows = rows;
+}
+
+void common_sampler_draft_probs::truncate(size_t rows) {
+    if (rows > n_rows) {
+        throw std::out_of_range("dense draft probability truncation grows rows");
+    }
+    n_rows = rows;
+}
+
+float * common_sampler_draft_probs::row(size_t index) {
+    if (index >= n_rows) {
+        throw std::out_of_range("dense draft probability row out of range");
+    }
+    return storage.data() + index*n_vocab;
+}
+
+const float * common_sampler_draft_probs::row(size_t index) const {
+    if (index >= n_rows) {
+        throw std::out_of_range("dense draft probability row out of range");
+    }
+    return storage.data() + index*n_vocab;
+}
+
 // Accept a drafted token with probability min(1, p/q), else draw from norm(max(0, p - q)).
 // Preserves the target distribution exactly, and accepts more often than matching does when the
 // draft samples instead of taking its argmax.
-std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const std::vector<std::vector<llama_token_data>> & draft_q, bool grammar_first) {
+static std::vector<llama_token> common_sampler_sample_and_accept_n_rejection_impl(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const std::vector<std::vector<llama_token_data>> * draft_q, const common_sampler_draft_probs * dense_q, bool grammar_first) {
     GGML_ASSERT(idxs.size()    == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
-    GGML_ASSERT(draft_q.size() == draft.size() && "draft_q must have one entry per draft token");
+    GGML_ASSERT((draft_q != nullptr) != (dense_q != nullptr));
+    GGML_ASSERT(!draft_q || draft_q->size() == draft.size());
 
     std::vector<llama_token> result;
     result.reserve(idxs.size());
@@ -776,6 +811,15 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
 
     std::vector<llama_token_data> cand; // candidate array masked by the grammar, if there is one
     const size_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx)));
+    if (dense_q) {
+        if (dense_q->size() != draft.size() || (!draft.empty() && dense_q->vocab_size() != n_vocab)) {
+            throw std::invalid_argument("dense draft probabilities do not match verification batch");
+        }
+        if (!gsmpl->dense_q_logged && !draft.empty()) {
+            LOG_INF("DSpark dense q verifier active: rows=%zu vocab=%zu\n", dense_q->size(), n_vocab);
+            gsmpl->dense_q_logged = true;
+        }
+    }
     std::vector<float> q_by_id;
 
     size_t i = 0;
@@ -784,25 +828,26 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
         const llama_token id_tgt = common_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);
 
         const auto * cur_p = common_sampler_get_candidates(gsmpl, true);
-        const auto & q     = draft_q[i];
+        const auto * q     = draft_q ? &(*draft_q)[i] : nullptr;
+        const float * q_dense = dense_q ? dense_q->row(i) : nullptr;
 
         // Full-vocabulary drafts can retain token-id order and need no scatter buffer.
-        bool q_by_token = q.size() == n_vocab;
+        bool q_by_token = q && q->size() == n_vocab;
         if (q_by_token) {
-            for (size_t k = 0; k < q.size(); ++k) {
-                q_by_token &= q[k].id == (llama_token) k;
+            for (size_t k = 0; k < q->size(); ++k) {
+                q_by_token &= (*q)[k].id == (llama_token) k;
             }
         }
-        if (!q_by_token) {
+        if (q && !q_by_token) {
             q_by_id.assign(n_vocab, 0.0f);
-            for (const auto & token : q) {
+            for (const auto & token : *q) {
                 if (token.id >= 0 && (size_t) token.id < n_vocab) {
                     q_by_id[token.id] = token.p;
                 }
             }
         }
         auto q_of = [&](llama_token id) {
-            return q_by_token ? q[id].p : q_by_id[id];
+            return q_dense ? q_dense[id] : q_by_token ? (*q)[id].p : q_by_id[id];
         };
 
         const bool masked = !grammar_first && grammar_should_apply(gsmpl);
@@ -887,6 +932,14 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
     }
 
     return result;
+}
+
+std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const std::vector<std::vector<llama_token_data>> & draft_q, bool grammar_first) {
+    return common_sampler_sample_and_accept_n_rejection_impl(gsmpl, ctx, idxs, draft, &draft_q, nullptr, grammar_first);
+}
+
+std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const common_sampler_draft_probs & draft_q, bool grammar_first) {
+    return common_sampler_sample_and_accept_n_rejection_impl(gsmpl, ctx, idxs, draft, nullptr, &draft_q, grammar_first);
 }
 
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first) {
