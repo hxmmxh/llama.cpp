@@ -815,6 +815,15 @@ void process_shaders() {
         // mul mat vec with integer dot product
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
         if (is_legacy_quant(tname) || tname == "mxfp4" || is_k_quant(tname) || tname == "iq1_s" || tname == "iq1_m" || tname == "iq4_xs") {
+            if (tname == "q4_k" || tname == "q6_k") {
+                const auto load_dict = merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}});
+                if (tname == "q4_k") {
+                    string_to_spv("mul_mat_vec_q4_k_q8_1_f32_m4_vec128", "mul_mat_vecq.comp", merge_maps(load_dict, {{"MMVQ_Q4K_VEC128", "1"}}));
+                } else {
+                    string_to_spv("mul_mat_vec_q6_k_q8_1_f32_m4_word32", "mul_mat_vecq.comp", merge_maps(load_dict, {{"MMVQ_Q6K_WORD32", "1"}}));
+                    string_to_spv("mul_mat_vec_q6_k_q8_1_f32_m4_branchless32", "mul_mat_vecq.comp", merge_maps(load_dict, {{"MMVQ_Q6K_WORD32", "1"}, {"MMVQ_Q6K_BRANCHLESS", "1"}}));
+                }
+            }
             string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}}));
             string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
             string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup_no_shmem", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));

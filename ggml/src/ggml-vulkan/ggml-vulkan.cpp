@@ -2026,6 +2026,20 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                                        align, disable_robustness, require_full_subgroups, required_subgroup_size);
     };
 
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    if (device->vendor_id == VK_VENDOR_ID_INTEL && device->integer_dot_product && device->subgroup_arithmetic &&
+        device->subgroup_size_control && device->subgroup_min_size <= 8 && device->subgroup_max_size >= 8 &&
+        device->subgroup_require_full_support && getenv("GGML_VK_DISABLE_M4_QUANT_LOAD_OPT") == nullptr) {
+        const size_t lengths[] = {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_len, mul_mat_vec_q6_k_q8_1_f32_m4_word32_len, mul_mat_vec_q6_k_q8_1_f32_m4_branchless32_len, mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_len};
+        const void * data[] = {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_data, mul_mat_vec_q6_k_q8_1_f32_m4_word32_data, mul_mat_vec_q6_k_q8_1_f32_m4_branchless32_data, mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_data};
+        const char * names[] = {"mul_mat_vec_q4_k_q8_1_f32_m4_vec128_rows2", "mul_mat_vec_q6_k_q8_1_f32_m4_word32_rows2", "mul_mat_vec_q6_k_q8_1_f32_m4_branchless32_rows4", "mul_mat_vec_q8_0_q8_1_f32_m4_rows4"};
+        const uint32_t rows[] = {2, 2, 4, 4};
+        for (uint32_t i = 0; i < 4; ++i) {
+            ggml_vk_create_pipeline(device, device->pipeline_m4_quant[i], names[i], lengths[i], data[i], "main", 5, sizeof(vk_mat_vec_push_constants), {rows[i], 1, 1}, {8, rows[i], 4}, 1, true, true, 8);
+        }
+    }
+#endif
+
     // FA scalar has two SPIR-V modules (MMQ vs non-MMQ); FA cm1 has one. K/V
     // quant type is selected at runtime via the FaTypeK / FaTypeV spec constants.
 
@@ -5566,6 +5580,20 @@ vk_pipeline ggml_vk_get_to_fp16(ggml_backend_vk_context * ctx, ggml_type type) {
 
 static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context * ctx, ggml_type a_type, ggml_type b_type, uint32_t num_cols, uint32_t m, uint32_t k) {
     VK_LOG_DEBUG("ggml_vk_get_dequantize_mul_mat_vec()");
+    const bool fc1 = k == 2560 && m == 10240;
+    const bool fc2 = k == 10240 && m == 2560;
+    if (b_type == GGML_TYPE_Q8_1 && num_cols == 4 && (fc1 || fc2)) {
+        if (a_type == GGML_TYPE_Q4_K && ctx->device->pipeline_m4_quant[0]) {
+            return ctx->device->pipeline_m4_quant[0];
+        }
+        if (a_type == GGML_TYPE_Q6_K && ctx->device->pipeline_m4_quant[fc1 ? 1 : 2]) {
+            return ctx->device->pipeline_m4_quant[fc1 ? 1 : 2];
+        }
+        if (a_type == GGML_TYPE_Q8_0 && ctx->device->pipeline_m4_quant[3]) {
+            return ctx->device->pipeline_m4_quant[3];
+        }
+    }
+
     GGML_ASSERT(b_type == GGML_TYPE_F32 || b_type == GGML_TYPE_F16 || b_type == GGML_TYPE_Q8_1);
     GGML_ASSERT(num_cols >= 1 && num_cols <= mul_mat_vec_max_cols);
 

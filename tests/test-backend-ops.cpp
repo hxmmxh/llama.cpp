@@ -11972,6 +11972,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 6, 4096, 5120, {1, 1}, {1, 1}));
 
+    // Quantized four-column FC shapes.
+    for (ggml_type type : {GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0}) {
+        test_cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32, 10240, 4, 2560, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32, 2560, 4, 10240, {1, 1}, {1, 1}));
+    }
+
     // SIMD K boundaries, including tails shorter than one vector.
     for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16}) {
         for (int k : {1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 48}) {

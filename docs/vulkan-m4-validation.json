@@ -1,0 +1,61 @@
+{
+  "date": "2026-11-13",
+  "branch": "vulkan_opt",
+  "base_commit": "dd0a17c00fc46c40fe003119a2d65bb867e54bb3",
+  "experiment": "20261113-162240-vulkan-m4-integrate",
+  "device": "Intel Arc 140T / Core Ultra 7 255H",
+  "driver": "32.0.101.6313",
+  "system": "Windows x64, AC, Interactive Session1",
+  "build": "Release with GGML_VULKAN_DEBUG=ON; diagnostics only, no performance measurements",
+  "configuration": {
+    "GGML_VK_DISABLE_COOPMAT": "1",
+    "optimized": "GGML_VK_DISABLE_M4_QUANT_LOAD_OPT unset",
+    "fallback": "GGML_VK_DISABLE_M4_QUANT_LOAD_OPT=1"
+  },
+  "selected_rows": {
+    "q4_k": {
+      "fc1": 2,
+      "fc2": 2
+    },
+    "q6_k": {
+      "fc1": 2,
+      "fc2": 4
+    },
+    "q8_0": {
+      "fc1": 4,
+      "fc2": 4
+    }
+  },
+  "checks": {
+    "native_build": true,
+    "local_cpp_syntax": true,
+    "local_cpu_reference_tests": 6,
+    "vulkan_cpu_reference_tests": 6,
+    "paired_cases": 31,
+    "full_outputs_bitwise_equal": true,
+    "stable_outputs": true,
+    "finite_outputs": true,
+    "fp64_reference": true,
+    "archived_m4_outputs_match": 6,
+    "actual_dispatch_and_workgroup_counts": true,
+    "m1_m3_m5_and_other_shapes_use_original_paths": true,
+    "q4_fp16_zero_and_subnormal_headers": true
+  },
+  "source_sha256": {
+    "ggml/src/ggml-vulkan/ggml-vulkan-types.h": "776b7ddc6b4a44922c12a360b4556555ca419e931c6b7d64dc041cb0c2120855",
+    "ggml/src/ggml-vulkan/ggml-vulkan.cpp": "2ca6a28f64e46d9946ba1f619ea073c61fbc635c1baceff6a9a9baabc72da30d",
+    "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp": "8ff9ad2d74670a25cd47731706e113801758805a67bbbbbd0d1c765a1353083a",
+    "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl": "53f0259f6bb993a696ab4ee2004ee35b74585a63776c88d9012cbe0b9661325d",
+    "ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp": "9b9454ca2e2fb3b37fe543911a5d0354df120dd4e650d22bfb19ab3ce882eb20",
+    "tests/test-backend-ops.cpp": "e58add222f97e8e805c8df4006db49401b8dd37bae7d4cc5043cf86a9e5c30ed",
+    "ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_loads.glsl": "878c67d18578e07e4d4052c9d3c0d5ed6378ea4bdb4ebdfe08af4e962c461e3c"
+  },
+  "source_manifest_sha256": "1aab07112cae22af800f787680cd36dc36856982bf33bd0f7c383f01f5db9c0f",
+  "source_zip_sha256": "0a92e2a6bd6e32b9e81136aeef1f0744383024f453c4bff968a40403bbf4b3d0",
+  "binaries": {
+    "probe": "0a1cdd265bcd042c3360557754c1612b67d7400e55763afef37a05de0601502a",
+    "test_backend_ops": "88087fbd620bb298347525827076f2386ea7b794f3f858b79a0c2cfb485de72e"
+  },
+  "evidence": "../../experiments/windows-cpu/windows_core_ultra_7_255h/20261113-162240-vulkan-m4-integrate/analysis/integration-validation.json",
+  "limits": "No full-model or fresh performance claim for the combined implementation; previous operator performance remains in the linked reports"
+}

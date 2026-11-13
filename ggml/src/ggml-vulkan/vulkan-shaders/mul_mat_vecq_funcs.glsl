@@ -320,12 +320,18 @@ i32vec4 repack4(uint ib, uint iqs) {
     const uint qs_shift = ((iqs_k % 16) / 8) * 4;
 
 #if defined(DATA_A_Q4_K)
+#if defined(MMVQ_Q4K_VEC128)
+    const uvec4 vals = (data_a_quants128[ib_k * 9 + 1 + qs_idx / 4] >> qs_shift) & uvec4(0x0F0F0F0F);
+    return i32vec4(vals);
+#else
     const uint32_t vals0 = (data_a_packed32[ib_k].qs[qs_idx    ] >> qs_shift) & 0x0F0F0F0F;
     const uint32_t vals1 = (data_a_packed32[ib_k].qs[qs_idx + 1] >> qs_shift) & 0x0F0F0F0F;
     const uint32_t vals2 = (data_a_packed32[ib_k].qs[qs_idx + 2] >> qs_shift) & 0x0F0F0F0F;
     const uint32_t vals3 = (data_a_packed32[ib_k].qs[qs_idx + 3] >> qs_shift) & 0x0F0F0F0F;
 
     return i32vec4(vals0, vals1, vals2, vals3);
+#endif
+
 #else // defined(DATA_A_Q5_K)
     const uint qh_idx = iqs;
     const uint qh_shift = iqs_k / 8;
@@ -346,9 +352,14 @@ vec2 get_dm_scale(uint ib, uint iqs) {
     const uint iqs_k = (ib % 8) * 8 + iqs;
     const uint is = iqs_k / 8;
 
+#if defined(DATA_A_Q4_K) && defined(MMVQ_Q4K_VEC128)
+    const uvec4 header = data_a_quants128[ib_k * 9];
+    const uvec3 scales = header.yzw;
+#else
     const uvec3 scales = uvec3(data_a_packed32[ib_k].scales[0],
                                data_a_packed32[ib_k].scales[1],
                                data_a_packed32[ib_k].scales[2]);
+#endif
     const uint scalesoffs = (is & 3) * 8;
 
     const uint scidx0 = (is < 4) ? 0 : 2;
@@ -362,7 +373,11 @@ vec2 get_dm_scale(uint ib, uint iqs) {
     const uint8_t mbyte = uint8_t(((scales[mbidx0] >> mbidxshift0) & 0xF) | ((scales[1] >> mbidxshift1) & 0x30));
     u8vec2 scale_dm = u8vec2(sc, mbyte);
 
+#if defined(DATA_A_Q4_K) && defined(MMVQ_Q4K_VEC128)
+    return FLOAT_TYPEV2(unpackHalf2x16(header.x)) * FLOAT_TYPEV2(scale_dm);
+#else
     return FLOAT_TYPEV2(data_a_packed32[ib_k].dm) * FLOAT_TYPEV2(scale_dm);
+#endif
 }
 
 FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
@@ -392,6 +407,10 @@ i32vec4 repack4(uint ib, uint iqs) {
     const uint qh_idx = (iqs_k / 32) * 8 + iqs;
     const uint qh_shift = ((iqs_k % 32) / 8) * 2;
 
+#if defined(MMVQ_Q6K_WORD32)
+    const uvec4 ql = load_q6_four(ib_k * 210 + ql_idx * 4);
+    const uvec4 qh = load_q6_four(ib_k * 210 + 128 + qh_idx * 4);
+#else
     const uvec4 ql = uvec4( uint32_t(data_a_packed16[ib_k].ql[ql_idx * 2    ]) |
                            (uint32_t(data_a_packed16[ib_k].ql[ql_idx * 2 + 1]) << 16),
                             uint32_t(data_a_packed16[ib_k].ql[ql_idx * 2 + 2]) |
@@ -409,6 +428,7 @@ i32vec4 repack4(uint ib, uint iqs) {
                            (uint32_t(data_a_packed16[ib_k].qh[qh_idx * 2 + 5]) << 16),
                             uint32_t(data_a_packed16[ib_k].qh[qh_idx * 2 + 6]) |
                            (uint32_t(data_a_packed16[ib_k].qh[qh_idx * 2 + 7]) << 16));
+#endif
 
     const uint vals0 = (( ql.x >> ql_shift) & 0x0F0F0F0F) |
                        (((qh.x >> qh_shift) & 0x03030303) << 4);

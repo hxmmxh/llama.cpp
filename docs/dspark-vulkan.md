@@ -117,3 +117,28 @@ if ($LASTEXITCODE -ne 0) { throw 'Dense-q replay failed' }
 设备测试覆盖 5 层特征复制/重排、稀疏概率边界、64 与 131072 词表、7 步 Q8 Markov 条件链。模型检查可在启动 server 前额外设置 `LLAMA_DSPARK_DEVICE_VALIDATE=1`，检查概率归一化及采样 token 的 CDF 区间；完成后移除此变量再测速度。Windows 的 CMake 配置不提供 `test-sampling` 目标，该测试已在本地 CPU 构建中运行。实际加载库来自本次独立构建目录，运行库和两个模型的测后 SHA-256 均通过核验；详见 [验证记录](dspark-vulkan-validation.json)。
 
 Dense-q replay 使用本地生成的小模型，比较2016组新旧表示的输出、候选概率及后续RNG轨迹，覆盖0/1/3/7行、无grammar及两种grammar顺序、全接受、首/中/尾拒绝、零概率和越界token。另检查131072词表存储的复用、截断、越界及尺寸溢出。它验证采样表示转换，不代替真实GPU模型正确性或吞吐测量。
+
+## M4 quantized matrix-vector kernels
+
+Intel devices with full SG8 support use the following kernels for four token columns at the tested FC shapes. FC1 is K=2560/N=10240 and FC2 is K=10240/N=2560, where N is the output channel count.
+
+| Weight type | Weight loads | Output channels per workgroup, FC1 / FC2 |
+| --- | --- | --- |
+| Q4_K | Aligned `uvec4` loads for both packed quants and the 16-byte d/dmin/scales header | 2 / 2 |
+| Q6_K | Word reconstruction for FC1; branchless reconstruction for FC2 | 2 / 4 |
+| Q8_0 | Original loads | 4 / 4 |
+
+Q4_K header FP16 values are decoded to FP32 with `unpackHalf2x16`. Increasing the output channel tile reuses each Q8_1 activation load and provides independent accumulators. Weight layout, allocation size, activation quantization, and each output's accumulation order are unchanged. Other shapes, token counts, unsupported devices, and MUL_MAT_ID keep the original kernels.
+
+Set `GGML_VK_DISABLE_M4_QUANT_LOAD_OPT=1` before backend initialization to disable both the load and tile specializations. This retains the existing switch name for compatibility.
+
+Arc 140T measurements, including activation quantization, established these changes separately:
+
+- Q4_K packed-quants vector loads reduced FC1/FC2 time by 24.57%/22.55% relative to the original kernel. Header vector loads then reduced time by 5.35%/5.10% relative to the quants-only version.
+- Q4_K two-channel tiles reduced time by 20.87%/17.50% relative to the quants-only vector-load version. Header loads and tiles were measured in separate experiments; these percentages are not a measured cumulative gain.
+- Q6_K FC1 word32 plus two-channel tiles reduced time by another 7.52% relative to word32 with one channel. FC2 branchless32 plus four-channel tiles reduced time by 25.75% relative to branchless32 with one channel. Four channels regressed on FC1, so the two shapes use different tiles.
+- Q8_0 four-channel tiles reduced time by 8.47%/12.29% relative to its original two-channel kernel. Wider weight loads and eight-channel tiles were not selected.
+
+All selected M4 candidates had bitwise-identical full outputs in their paired operator tests. These are operator results; they do not establish full-model throughput for the combined implementation. See the [Q4_K load report](../../../reports/igpu中耗时分布分析/20261113-113218-vulkan-q4k-m4-parallel/README.md), [header report](../../../reports/igpu中耗时分布分析/20261113-144458-vulkan-q4k-m4-header/README.md), [Q4_K tile report](../../../reports/igpu中耗时分布分析/20261113-150105-vulkan-m4-compute/README.md), and [Q6_K/Q8_0 tile report](../../../reports/igpu中耗时分布分析/20261113-151617-vulkan-q6-q8-m4-tiles/README.md).
+
+The integrated branch implementation was validated on 2026-11-13: 31 optimized/fallback graph pairs were bitwise identical, including M=1/3/4/5, boundary dimensions and zero/subnormal Q4_K headers. Six new `test-backend-ops` cases passed against the CPU reference on Vulkan, and passed locally on CPU. Debug dispatch logs confirmed the selected kernels and workgroup counts. The six M4 outputs also matched the archived experiments. See [integration validation](vulkan-m4-validation.json) for source and binary hashes.
