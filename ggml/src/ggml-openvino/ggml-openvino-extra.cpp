@@ -449,6 +449,11 @@ std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor *
 // Extracted Layout Calculation
 // =====================================================
 
+bool ggml_openvino_use_f16_zero_point(const ggml_tensor * tensor, bool use_bias) {
+    // Q4_K stores a separate minimum; rounding min/scale changes the weights.
+    return use_bias || tensor->ne[2] > 1 || tensor->type == GGML_TYPE_Q4_K;
+}
+
 ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_tensor * tensor, bool use_bias) {
     ggml_openvino_extracted_layout layout = {};
     layout.is_symmetric = false;
@@ -463,12 +468,6 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     if (tensor->ne[3] != 1) {
         return layout;
     }
-
-    // 3D MoE expert weights that are not requantized (see below) always use the exact f16
-    // zero-point extraction (see extract_quantized_weights), which needs a wider zp slot than
-    // the packed integer zero point -- must be kept in sync with that function so the buffer
-    // sizing here matches what process_weight_tensor actually writes.
-    const bool for_gather_matmul = tensor->ne[2] > 1;
 
     int64_t n_elements = ggml_nelements(tensor);
     const size_t alignment = 64;  // Good for SIMD
@@ -604,12 +603,10 @@ ggml_openvino_extracted_layout ggml_openvino_get_extracted_layout(const ggml_ten
     int64_t n_blocks = n_elements / layout.weights_per_block;
     layout.scales_size = n_blocks * (tensor->type == GGML_TYPE_MXFP4 ? sizeof(uint8_t) : sizeof(uint16_t));
     // For symmetric quantization, no zp needed (weights stored as signed). Asymmetric
-    // for_gather_matmul (3D MoE expert) weights use an exact f16 zero point (see
-    // extract_quantized_weights/make_int8_weights/make_int4_weights), which needs one f16 per
-    // block instead of a packed u4/u8 integer zero point.
+    // Fractional zero points need one f16 per block instead of a packed integer.
     if (layout.is_symmetric) {
         layout.zp_size = 0;
-    } else if (use_bias || for_gather_matmul) {
+    } else if (ggml_openvino_use_f16_zero_point(tensor, use_bias)) {
         layout.zp_size = n_blocks * sizeof(uint16_t);
     } else {
         layout.zp_size = layout.is_u4 ? ((n_blocks + 1) / 2) : n_blocks;

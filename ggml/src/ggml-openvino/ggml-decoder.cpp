@@ -79,12 +79,21 @@ GgmlOvDecoder::GgmlOvDecoder(ggml_cgraph * cgraph,
 
 void GgmlOvDecoder::update_io(ggml_cgraph * cgraph) {
     m_cgraph = cgraph;
+    m_inputs.clear();
     m_model_inputs.clear();
     m_model_outputs.clear();
     m_node_info_list.clear();
+    m_node_dynamic_dims.clear();
     set_input_output();
+    if (!m_naive) {
+        compute_node_dynamic_dims();
+    }
     compute_model_inputs();
     compute_model_outputs();
+    for (auto & node : m_node_info_list) {
+        node.node_op_case = compute_op_case(node.node);
+        node.node_op_type = compute_op_type(node.node);
+    }
 }
 
 // llama keeps separate graphs for batches with and without outputs, so a cache hit can come from a
@@ -184,7 +193,7 @@ std::string GgmlOvDecoder::get_tensor_name(const ggml_cgraph * cgraph, const ggm
     if (tensor == nullptr) {
         return "";
     }
-    if ((tensor->flags & GGML_TENSOR_FLAG_COMPUTE) || is_kvcache(tensor, nullptr)) {
+    if ((tensor->flags & (GGML_TENSOR_FLAG_COMPUTE | GGML_TENSOR_FLAG_INPUT)) || is_kvcache(tensor, nullptr)) {
         // Hash-table slots depend on tensor addresses and differ between contexts.
         // Graph ordinals disambiguate duplicate names while keeping compiled-model
         // ports identical for equivalent graphs in different contexts.
@@ -195,6 +204,17 @@ std::string GgmlOvDecoder::get_tensor_name(const ggml_cgraph * cgraph, const ggm
         const auto * leaf = std::find(cgraph->leafs, cgraph->leafs + cgraph->n_leafs, tensor);
         if (leaf != cgraph->leafs + cgraph->n_leafs) {
             return std::string(tensor->name) + "#l" + std::to_string(leaf - cgraph->leafs);
+        }
+    }
+    // Scheduler graph views can omit leafs. Distinct inputs still need distinct
+    // ports: full and sliding-window KV indices have identical ggml names.
+    if (tensor->flags & GGML_TENSOR_FLAG_INPUT) {
+        for (int i = 0; i < cgraph->n_nodes; ++i) {
+            for (int j = 0; j < GGML_MAX_SRC; ++j) {
+                if (cgraph->nodes[i]->src[j] == tensor) {
+                    return std::string(tensor->name) + "#i" + std::to_string(i) + ":" + std::to_string(j);
+                }
+            }
         }
     }
     return tensor->name;
@@ -1170,7 +1190,7 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
     } else {
         input_shape = ov::PartialShape{get_shape(input)};
     }
-    if (dynamic_dim_index != -1 && m_model_is_splitted) {
+    if (dynamic_dim_index != -1 && (m_model_is_splitted || !m_is_static)) {
         input_shape[3 - dynamic_dim_index] = -1;
     }
     if (op->op == GGML_OP_SOFT_MAX && op->src[1] != nullptr && op->src[1]->op == GGML_OP_NONE &&
@@ -1388,7 +1408,7 @@ void GgmlOvDecoder::compute_model_outputs() {
                     }
                 }
             }
-            if (input_use_count == cur_node_use_count) {
+            if (input_use_count == cur_node_use_count && !(cur_node->flags & GGML_TENSOR_FLAG_OUTPUT)) {
                 cur_node = nullptr;
             }
         }
@@ -2117,6 +2137,15 @@ void GgmlOvDecoder::compute_node_dynamic_dims() {
                     continue;
                 }
                 if (is_inp_scale_rows(src, node)) {
+                    m_node_dynamic_dims[src] = 1;
+                    continue;
+                }
+                // External embeddings and draft features carry tokens on dim 1.
+                if (src->op == GGML_OP_NONE && src->type == GGML_TYPE_F32 &&
+                    (src->flags & GGML_TENSOR_FLAG_INPUT) && src->ne[2] == 1 && src->ne[3] == 1 &&
+                    ((node->op == GGML_OP_MUL_MAT && src == node->src[1]) ||
+                     ((node->op == GGML_OP_RESHAPE || node->op == GGML_OP_DUP || node->op == GGML_OP_RMS_NORM) &&
+                      src == node->src[0]))) {
                     m_node_dynamic_dims[src] = 1;
                     continue;
                 }

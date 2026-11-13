@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "openvino/runtime/core.hpp"
 
 #define CL_TARGET_OPENCL_VERSION 300
@@ -134,6 +135,8 @@ bool ggml_openvino_weight_buffers_released();
 // Get requantization type for a tensor type (returns nullopt if no requant needed)
 std::optional<ExtraQuantType> ggml_openvino_get_requant_type(const ggml_tensor * tensor, bool no_requant = false);
 
+bool ggml_openvino_use_f16_zero_point(const ggml_tensor * tensor, bool use_bias);
+
 // =====================================================
 // OpenVINO Tensor Extra Types
 // =====================================================
@@ -216,6 +219,9 @@ ggml_openvino_tensor_extra * ggml_openvino_create_tensor_extra(const ggml_tensor
 
 // Check if a tensor's buffer uses remote (device) memory (e.g. GPU USM)
 bool ggml_openvino_buffer_is_remote(const ggml_tensor * tensor);
+
+// Changes on backend writes; allocation identity is tracked separately by ctx_id.
+uint64_t ggml_openvino_buffer_get_revision(ggml_backend_buffer_t buffer);
 
 // Register an extra with the tensor's OpenVINO buffer context for proper lifetime management.
 // This sets tensor->extra and tracks the extra in the buffer context for cleanup.

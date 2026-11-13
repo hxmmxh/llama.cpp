@@ -17,21 +17,27 @@
 
 // Cache key for a translated/compiled graph. Node count plus the two end node names identify a
 // graph during inference, where the same few graphs repeat for the whole session. The list of
-// external input names below tells those apart more precisely, but it walks every node and every
-// src slot, so it is built only when GGML_OPENVINO_FULL_GRAPH_KEY is set. Op tests run many small
+// explicit output names also distinguishes feature extraction graphs. External input signatures
+// walk every node and src slot, so those are built only when GGML_OPENVINO_FULL_GRAPH_KEY is set. Op tests run many small
 // graphs that can share a node count and end names, and need the full key.
 struct graph_key {
     int n_nodes;
     int n_leaves;
     std::string first_node_name;
     std::string last_node_name;
-    // Each entry: "<node_idx>:<src_idx>:<op_type>"
+    // Entries identify explicit outputs and, optionally, external inputs.
     std::vector<std::string> input_srcs;
 
     graph_key(const ggml_cgraph * cgraph, bool include_inputs = false) : n_nodes(cgraph->n_nodes), n_leaves(cgraph->n_leafs) {
         if (n_nodes > 0) {
             first_node_name = cgraph->nodes[0]->name;
             last_node_name = cgraph->nodes[n_nodes - 1]->name;
+        }
+
+        for (int i = 0; i < n_nodes; ++i) {
+            if (cgraph->nodes[i]->flags & GGML_TENSOR_FLAG_OUTPUT) {
+                input_srcs.push_back("out:" + std::to_string(i) + ":" + cgraph->nodes[i]->name);
+            }
         }
 
         static const bool full_key = ggml_openvino_getenv_int("GGML_OPENVINO_FULL_GRAPH_KEY") != 0;
@@ -95,6 +101,16 @@ struct ov_compiled_graph {
     std::vector<std::string> output_names;
 };
 
+// A bounded, backend-private cache for the small-graph path. The decoder owns
+// tensor bindings, so a request can only be reused with the same exact graph.
+struct ov_naive_graph {
+    std::string key;
+    std::shared_ptr<GgmlOvDecoder> decoder;
+    std::shared_ptr<ov::InferRequest> request;
+    std::vector<std::string> input_names;
+    std::vector<std::string> output_names;
+};
+
 // Only compilation and cache publication use this mutex. Requests, decoders and
 // sequence state belong to individual backend contexts and never enter this cache.
 struct ov_compiled_model_cache {
@@ -112,6 +128,7 @@ struct ov_runtime_context {
     mutable std::mutex ctx_mutex;
     std::string device;
     bool stateful;
+    std::shared_ptr<ov_naive_graph> naive_graph;
     std::unordered_map<graph_key, std::shared_ptr<decoder_runtime_ctx>, graph_key_hash> decoder_cache;
     std::unordered_map<graph_key, std::shared_ptr<ov::InferRequest>, graph_key_hash> infer_request_cache;
     std::unordered_map<graph_key, std::shared_ptr<ov::InferRequest>, graph_key_hash> infer_request_cache_prefill;
@@ -129,6 +146,7 @@ struct ov_runtime_context {
     ov_runtime_context() : device("CPU"), stateful(false), stateful_kv_size(0) {}
 
     void clear_caches_locked() {
+        naive_graph.reset();
         decoder_cache.clear();
         infer_request_cache.clear();
         infer_request_cache_prefill.clear();

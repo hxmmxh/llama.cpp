@@ -357,6 +357,16 @@ void extract_q4_k_data(const ggml_tensor * tensor,
             }
         }
         unpack_256_4(block_data + 16, weights + i * 128);
+        if (use_bias) {
+            for (int j = 0; j < 8; ++j) {
+                // A zero scale with a nonzero minimum represents a constant.
+                // Encode it as (0 - min) * 1 so division by scale cannot drop it.
+                if (scale_vals[j] == 0.0f && min_vals[j] != 0.0f) {
+                    scales[i * 8 + j] = ov::float16(1.0f);
+                    std::fill_n(weights + i * 128 + j * 16, 16, uint8_t(0));
+                }
+            }
+        }
     });
 }
 
@@ -1018,9 +1028,7 @@ std::shared_ptr<ov::Node> extract_quantized_weights(const ggml_tensor * tensor,
                                                     ov::Tensor & weights,
                                                     ov::Tensor & scales,
                                                     ov::Tensor & zp,
-                                                    // Use an exact f16 zero point (vs. a rounded integer one); always
-                                                    // used for for_gather_matmul (3D MoE expert) weights regardless of
-                                                    // this flag, and also settable explicitly for test-backend-ops.
+                                                    // Q4_K and 3D expert weights also select fractional zero points.
                                                     bool use_bias = false) {
     // Create a temporary tensor for extraction functions that read from tensor->data
     ggml_tensor temp_tensor = *tensor;
@@ -1058,12 +1066,8 @@ std::shared_ptr<ov::Node> extract_quantized_weights(const ggml_tensor * tensor,
                                  std::string(ggml_type_name(tensor->type)));
     }
 
-    // 3D MoE expert weights (for_gather_matmul) always use the exact f16 zero-point extraction
-    // (see make_int8_weights/make_int4_weights) rather than the rounded integer zero point --
-    // round(min/scale) error is what corrupts Q4_K/Q5_1 experts, and the f16-zp form still fuses
-    // into GatherMatmulCompressed since it stays a Subtract, not an Add.
     const bool for_gather_matmul = tensor->ne[2] > 1;
-    use_bias = use_bias || for_gather_matmul;
+    use_bias = ggml_openvino_use_f16_zero_point(tensor, use_bias);
 
     // Extract quantized data
     switch (tensor->type) {
@@ -1258,13 +1262,7 @@ OvWeight process_weight_tensor(const ggml_tensor * tensor, const void * data, vo
         OPENVINO_THROW("Unsupported quantized type: ", ggml_type_name(tensor->type));
     }
 
-    // 3D MoE expert weights (for_gather_matmul) always use the exact f16 zero-point path (see
-    // extract_quantized_weights) -- must be kept in sync with the "use_bias || for_gather_matmul"
-    // check in ggml_openvino_get_extracted_layout, which sizes/offsets the zp slot accordingly.
-    // Requantized tensors (layout.is_requant) are handled by requantize_to_buffers instead, whose
-    // zp sizing/type is unaffected by for_gather_matmul, so they are excluded here.
-    const bool for_gather_matmul = tensor->ne[2] > 1;
-    const bool zp_is_f16 = !layout.is_requant && (use_bias || for_gather_matmul);
+    const bool zp_is_f16 = !layout.is_requant && ggml_openvino_use_f16_zero_point(tensor, use_bias);
 
     const bool is_3d_mxfp4_moe = tensor->type == GGML_TYPE_MXFP4 && (tensor->ne[2] > 1 || tensor->ne[3] > 1);
     if (is_3d_mxfp4_moe) {

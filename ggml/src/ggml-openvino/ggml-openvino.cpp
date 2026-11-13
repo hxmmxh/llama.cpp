@@ -67,6 +67,7 @@ struct ggml_backend_openvino_buffer_context {
     int device;
     std::string name;
     size_t id;
+    std::atomic<uint64_t> revision{0};
 
     // For non-weight buffers (KV cache, compute), we still use contiguous allocation
     void * data;
@@ -323,6 +324,8 @@ static enum ggml_status ggml_backend_openvino_buffer_init_tensor(ggml_backend_bu
     // Put kvcache on device memory for GPU (NPU memory is too small even for kvcache)
     if (strncmp(tensor->name, "cache_", 6) == 0 && !ctx->is_remote && ggml_openvino_is_gpu() &&
         !is_stateful_enabled()) {
+        // Replacing the host allocation would invalidate any existing tensor
+        // wrappers. Allocate KV roots in a dedicated buffer before other tensors.
         GGML_ASSERT(ctx->tensor_extras.empty());
         auto device = ctx->device;
         auto size = ctx->size;
@@ -387,6 +390,7 @@ static void ggml_backend_openvino_buffer_memset_tensor(ggml_backend_buffer_t buf
     // GGML_LOG_DEBUG("%s: buffer usage=%d, tensor name=%s\n", __func__, buffer->usage, tensor->name);
     GGML_ASSERT(tensor != nullptr && tensor->data != nullptr);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
+    ctx->revision.fetch_add(1, std::memory_order_relaxed);
 
     if (ctx->is_remote) {
         // For remote (device) buffers, use OpenCL USM memfill
@@ -416,6 +420,7 @@ static void ggml_backend_openvino_buffer_set_tensor(ggml_backend_buffer_t buffer
     // GGML_LOG_DEBUG("%s: buffer usage=%d, tensor name=%s\n", __func__, buffer->usage, tensor->name);
     GGML_ASSERT(tensor != nullptr && tensor->data != nullptr);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
+    ctx->revision.fetch_add(1, std::memory_order_relaxed);
 
     // Check if this is a weight buffer (usage is set BEFORE set_tensor is called, except in test-backend-ops)
     bool is_weight_buffer = (buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
@@ -563,6 +568,7 @@ static bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer
     // GGML_LOG_DEBUG("%s: src tensor name=%s, dst tensor name=%s\n", __func__, src->name, dst->name);
     GGML_ASSERT(src != nullptr && dst != nullptr);
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
+    ctx->revision.fetch_add(1, std::memory_order_relaxed);
 
     if (ctx->is_remote) {
         // For remote (device) buffers, use OpenCL USM memcpy
@@ -607,6 +613,7 @@ static bool ggml_backend_openvino_buffer_cpy_tensor(ggml_backend_buffer_t buffer
 
 static void ggml_backend_openvino_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
+    ctx->revision.fetch_add(1, std::memory_order_relaxed);
     GGML_ASSERT(ctx->data != nullptr);
     if (ctx->is_remote) {
         cl_command_queue queue = ggml_openvino_get_cl_queue();
@@ -796,6 +803,12 @@ size_t ggml_backend_openvino_buffer_get_ctx_id(ggml_backend_buffer_t buffer) {
     }
     ggml_backend_openvino_buffer_context * ctx = (ggml_backend_openvino_buffer_context *) buffer->context;
     return ctx->id;
+}
+
+uint64_t ggml_openvino_buffer_get_revision(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(ggml_backend_buffer_is_openvino(buffer));
+    auto * ctx = static_cast<ggml_backend_openvino_buffer_context *>(buffer->context);
+    return ctx->revision.load(std::memory_order_relaxed);
 }
 
 bool ggml_openvino_buffer_is_remote(const ggml_tensor * tensor) {

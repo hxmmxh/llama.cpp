@@ -335,7 +335,12 @@ public:
 
     const ggml_tensor * get_tensor_from_name(const std::string & name) const;
 
-    void clear_model_weights() { m_model_weights.clear(); }
+    void clear_model_weights() {
+        // Keep names so update_io() still distinguishes Constants from inputs.
+        for (auto & weight : m_model_weights) {
+            weight.second.reset();
+        }
+    }
 
     static std::pair<ModelParams, ComputeParams> compute_llm_params(ggml_cgraph * cgraph, bool is_static);
 
