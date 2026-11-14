@@ -4,6 +4,28 @@
 
 The local DSpark integration after `7a9121b51` is documented in [DSpark CPU optimizations](dspark-cpu.md), including the runtime changes, mixed-quantization recipe, build/run commands and validation boundaries.
 
+## Integrated optimization inventory (2026-11-15)
+
+The `openvino_opt` checkout at `78026015644836e131612f051a9362bb160cf2d0` contains the CPU work below and the later device/backend changes. The worktree was clean when this inventory was prepared. This documentation update preserves those implementation commits; it does not squash them or add another kernel optimization.
+
+| Commits | Optimization | Applicable execution |
+| --- | --- | --- |
+| `21c04fe8e` | Schedule GQA4 heads and KV chunks together while retaining each head's arithmetic order. | Single-token F16 attention with D256 heads and at least 512 KV positions; unsupported shapes retain the original path. |
+| `86529d2ae` | Split wide, single-row F32 GEGLU over aligned column ranges. | Multiple CPU threads and at least 4096 output elements. |
+| `fa148dff8` | Vectorize Q8_K activation maxima, rounding, packing and block sums. | AArch64 NEON; this path does not execute on Ultra 7. |
+| `994477dc4`, `7a9121b51` | Fuse Q8 V dequantization with PV accumulation and share the converted values across two query heads. | Eligible CPU Q8 V attention paths; an F16 KV benchmark does not measure these paths. |
+| `93fda8222` | Add ARM BF16 dot, Q4/Q6 M7 tail reuse and M8 kernels, parallel activation preparation and ARGMAX; pad the eligible shared Q8 head from M7 to M8. | ARM kernels require their respective NEON/DOTPROD/I8MM features. Shared-head padding requires its exact CPU_REPACK shape. |
+| `ac000d089` | Reuse a CPU backend/thread pool for Markov projection, cache W1 in Q8 form, use integer Q8 W2 where exactly representable, simplify sampling and avoid unnecessary sampler copies. Add x64 signed-byte VNNI dots. | CPU DSpark, with FP32 and ISA fallbacks. W1 quantization is lossy relative to the older FP32 path. |
+| `ce1e5fd2c` | Compute only eight valid Q6 verification positions and use signed-byte VNNI dots. | Eligible narrow M8 CPU verification kernels. |
+| `4d36b1461` | Reuse Q8 weights over M7/M8 positions with a worker-occupancy guard; add Q4_K VNNI GEMV and two-row M4/M8 reuse; share F16 key conversion between GQA4 heads; stop top-p bucket sorting when the nucleus is complete. | Eligible x64 ISA/shape combinations and the existing target sampler. See [integration details](cpu-hotspots-20261106.md). |
+| `0cc8e02d8` | Keep Markov sampling and target-feature assembly on the selected device. | Opt-in GPU DSpark; excluded from a CPU-only benchmark. |
+| `dd0a17c00` | Transfer draft probabilities in dense token-ID order and read them directly during rejection sampling. | Opt-in device DSpark with `LLAMA_DSPARK_DENSE_Q=1`; excluded from a CPU-only benchmark. |
+| `780260156` | Separate full/SWA KV indices, preserve dynamic draft features and fractional Q4 zero points, validate cached bindings and reuse small OpenVINO graph requests. | OpenVINO backend; excluded from a CPU-only build. |
+
+Draft Q4 targetmix and Q8 backbone are separate mixed-quantization recipes, not descriptions of every tensor's precision. Both retain small BF16/F32 tensors. Their weight changes and the earlier Markov quantization must be distinguished from arithmetic-preserving kernel changes.
+
+Existing measurements below and in the linked validation records retain their original model, machine, build, sampling and comparison limits. In particular, the 4B and ARM results do not establish 1.7B Ultra 7 throughput. A new 1.7B run must identify the actual CPU binary and all three GGUF files, preserve the full `gen.txt` and test-C messages, and record Q4/Q8 draft results separately. Use thinking low, target T=1/top_p=0.95 and probabilistic draft T=1/top_p=1; keep F16 KV, FA, thread count, output budget and the first-token timing convention explicit. Task accuracy remains unmeasured without an answer scorer.
+
 **GQA four-head decode and scheduling**
 
 The first change ports the independently tested GQA4 attention patch from `a34de8618b25dfc32ee43749db47d767a9f0a25d`. Its workspace source is `cpu_infer/op_optimizer/gqa4_attention/patches/gqa4-attention.patch`.
