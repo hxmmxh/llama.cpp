@@ -1,3 +1,4 @@
+#include "ggml-trace.h"
 #include "sampling.h"
 
 #include "common.h"
@@ -797,6 +798,7 @@ const float * common_sampler_draft_probs::row(size_t index) const {
 // Preserves the target distribution exactly, and accepts more often than matching does when the
 // draft samples instead of taking its argmax.
 static std::vector<llama_token> common_sampler_sample_and_accept_n_rejection_impl(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const std::vector<std::vector<llama_token_data>> * draft_q, const common_sampler_draft_probs * dense_q, bool grammar_first) {
+    ggml_trace_scope trace_scope("dspark.rejection_sampling", "sampling", 0, "draft_tokens", draft.size());
     GGML_ASSERT(idxs.size()    == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
     GGML_ASSERT((draft_q != nullptr) != (dense_q != nullptr));
     GGML_ASSERT(!draft_q || draft_q->size() == draft.size());

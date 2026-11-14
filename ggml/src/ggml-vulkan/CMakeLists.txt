@@ -61,6 +61,8 @@ if (Vulkan_FOUND)
 
     ggml_add_backend_library(ggml-vulkan
                              ggml-vulkan.cpp
+                             ggml-vulkan-trace.cpp
+                             ggml-vulkan-trace.h
                              ../../include/ggml-vulkan.h
                              ggml-vulkan-types.h
                              ggml-vulkan-push-constants.h

@@ -1,3 +1,4 @@
+#include "ggml-trace.h"
 #include "llama-context.h"
 
 #include "ggml.h"
@@ -890,6 +891,7 @@ void llama_context::sched_reserve() {
 }
 
 void llama_context::synchronize() {
+    ggml_trace_scope trace_scope("llama.synchronize", "wait");
     if (!sched) {
         return;
     }
@@ -1430,6 +1432,7 @@ void llama_dspark_device_reset(llama_context * target, llama_context * draft) {
 
 void llama_context::set_dspark_device_features(llama_context & target, size_t row_offset, size_t n_rows) {
     GGML_ASSERT(cparams.dspark_device_features && n_rows > 0);
+    ggml_trace_scope trace_scope("dspark.feature_handoff", "dspark");
     target.synchronize();
     dspark_features.layers.clear();
     for (const int32_t lid : model.target_layer_ids) {
@@ -1478,6 +1481,7 @@ void llama_context::set_dspark_device_sampling(const float * uniforms, size_t co
 }
 
 const llama_token * llama_context::get_dspark_device_tokens() {
+    ggml_trace_scope trace_scope("dspark.get_tokens", "dspark");
     synchronize();
     GGML_ASSERT(cparams.dspark_device_sampling && !dspark_tokens.empty());
     output_reorder();
@@ -1485,6 +1489,7 @@ const llama_token * llama_context::get_dspark_device_tokens() {
 }
 
 const float * llama_context::get_dspark_device_probs(int32_t index) {
+    ggml_trace_scope trace_scope("dspark.get_probs", "dspark");
     synchronize();
     output_reorder();
     const size_t vocab = model.vocab.n_tokens();
@@ -1683,6 +1688,10 @@ bool llama_context::set_adapter_cvec(
 }
 
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+    auto trace_context = ggml_trace_get_context();
+    if (ggml_trace_enabled()) { trace_context.graph_id = ggml_trace_next_id(); }
+    ggml_trace_context_guard trace_guard(trace_context);
+    ggml_trace_scope trace_scope("llama.ubatch", "graph", trace_context.graph_id, "tokens", ubatch.n_tokens);
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -1717,6 +1726,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             ggml_backend_sched_synchronize(sched.get());
         }
 
+        ggml_trace_instant("llama.graph_reused", nullptr, 0);
         n_reused++;
     } else {
         gf_res_prev_active = nullptr;
@@ -1727,7 +1737,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         //const auto t_start_us = ggml_time_us();
 
-        gf = model.build_graph(gparams);
+        {
+            ggml_trace_scope trace_build("llama.build_graph", "graph");
+            gf = model.build_graph(gparams);
+        }
 
         //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
 
@@ -1737,6 +1750,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
+        ggml_trace_scope trace_alloc("llama.allocate_graph", "graph");
         if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
@@ -1751,6 +1765,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //const auto t_start_us = ggml_time_us();
 
         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
+        ggml_trace_scope trace_inputs("llama.set_inputs", "graph");
         res->set_inputs(&ubatch);
 
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
@@ -2310,6 +2325,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         }
 
         if (res->t_dspark_tokens) {
+            ggml_trace_scope trace_readback("dspark.enqueue_readback", "readback");
             auto * tokens = res->t_dspark_tokens;
             dspark_tokens.resize(ggml_nelements(tokens));
             auto * backend = ggml_backend_sched_get_tensor_backend(sched.get(), tokens);

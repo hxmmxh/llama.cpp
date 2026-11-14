@@ -1,3 +1,4 @@
+#include "ggml-trace.h"
 #include "server-context.h"
 #include <atomic>
 #include <thread>
@@ -3456,6 +3457,10 @@ private:
     }
 
     void update_slots() {
+        auto trace_context = ggml_trace_get_context();
+        if (ggml_trace_enabled()) { trace_context.round_id = ggml_trace_next_id(); }
+        ggml_trace_context_guard trace_guard(trace_context);
+        ggml_trace_scope trace_round("server.iteration", "round", trace_context.round_id);
 #ifdef DEBUG_TIMINGS
         static int64_t t_prev = 0;
         int64_t t_start = ggml_time_us();
@@ -3808,6 +3813,7 @@ private:
         // generate the actual drafts (if any)
         if (!drafting.empty()) {
             queue_tasks.yield_to_queue([&]() {
+                ggml_trace_scope trace_draft("server.draft", "dspark");
                 common_speculative_draft(spec.get());
             });
         }
@@ -4586,6 +4592,7 @@ private:
         // note: the sync is done here too, so that the wait is also covered by the yield
         int ret = 0;
         queue_tasks.yield_to_queue([&]() {
+            ggml_trace_scope trace_target("server.target_batch", "target", 0, "tokens", batch.view.size());
             ret = llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch.view.get());
             if (ret == 0 && has_output) {
                 llama_synchronize(ctx_tgt);
@@ -4651,6 +4658,7 @@ private:
         if (spec) {
             bool ok = true;
             queue_tasks.yield_to_queue([&]() {
+                ggml_trace_scope trace_process("server.draft_process", "dspark");
                 ok = common_speculative_process(spec.get(), batch.view);
             });
 
@@ -4827,6 +4835,7 @@ private:
 
             // verify and try to accept the draft
             {
+                ggml_trace_scope trace_accept("server.accept_and_rollback", "dspark");
                 const bool may_restore_sampler =
                     ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
                     (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS && n_draft > llama_n_rs_seq(ctx_tgt));

@@ -1,4 +1,5 @@
 #include "ggml-vulkan-common.h"
+#include "ggml-vulkan-trace.h"
 
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
@@ -337,6 +338,7 @@ static VkDeviceSize ggml_vk_get_max_buffer_range(const ggml_backend_vk_context *
 }
 
 void ggml_vk_wait_for_fence(ggml_backend_vk_context * ctx) {
+    ggml_trace_scope trace_scope("vulkan.wait_for_fence", "wait");
     // Use waitForFences while most of the graph executes. Hopefully the CPU can sleep
     // during this wait.
     if (ctx->almost_ready_fence_pending) {
@@ -908,6 +910,7 @@ void ggml_vk_submit(vk_context& ctx, vk::Fence fence) {
     }
     VK_LOG_DEBUG("ggml_vk_submit(" << ctx << ", " << fence << ")");
 
+    ggml_trace_scope trace_scope("vulkan.submit", "submit");
     std::vector<std::vector<uint64_t>> tl_wait_vals;
     std::vector<std::vector<uint64_t>> tl_signal_vals;
     std::vector<std::vector<vk::Semaphore>> tl_wait_semaphores;
@@ -971,7 +974,19 @@ void ggml_vk_submit(vk_context& ctx, vk::Fence fence) {
         }
     }
 
+    const uint64_t trace_submit_ns = ggml_trace_enabled() ? ggml_trace_time_ns() : 0;
     ctx->p->q->handle->submit(submit_infos, fence);
+    const uint64_t trace_submit_end_ns = trace_submit_ns ? ggml_trace_time_ns() : 0;
+    if (trace_submit_ns) {
+        auto device = ctx->p->q->handle->device.lock();
+        if (device && device->trace) {
+            for (const auto & sequence : ctx->seqs) {
+                for (const auto & submission : sequence) {
+                    ggml_vk_trace_submit(device, *submission.buffer, trace_submit_ns, trace_submit_end_ns);
+                }
+            }
+        }
+    }
 
     ctx->seqs.clear();
 }
@@ -4334,6 +4349,10 @@ vk_device ggml_vk_get_device(size_t idx) {
         std::vector<vk::DeviceQueueCreateInfo> device_queue_create_infos;
         vk::DeviceCreateInfo device_create_info{};
         std::vector<const char *> device_extensions;
+        const char * trace_extension = ggml_vk_trace_extension(ext_props);
+        if (trace_extension) {
+            device_extensions.push_back(trace_extension);
+        }
         vk::PhysicalDeviceFeatures device_features = device->physical_device.getFeatures();
 
         VkPhysicalDeviceFeatures2 device_features2;
@@ -4928,6 +4947,8 @@ vk_device ggml_vk_get_device(size_t idx) {
 
             device->async_use_transfer_queue = false;
         }
+
+        ggml_vk_trace_init(device, vk_instance.instance, trace_extension, vk12_features.hostQueryReset);
 
         device->fence = device->device.createFence({});
 
@@ -5842,6 +5863,11 @@ void ggml_vk_ctx_end(vk_context& ctx) {
         vk_instance.pfn_vkCmdEndDebugUtilsLabelEXT(ctx->s->buffer->buf);
     }
 
+    if (ctx->s->buffer->trace_slot >= 0) {
+        if (auto device = ctx->p->q->handle->device.lock()) {
+            ggml_vk_trace_end(device, *ctx->s->buffer);
+        }
+    }
     ctx->s->buffer->buf.end();
     ctx->s = nullptr;
 }
@@ -5854,6 +5880,7 @@ void ggml_vk_ctx_begin(vk_device& device, vk_context& subctx) {
 
     subctx->seqs.push_back({ ggml_vk_begin_submission(device, *subctx->p) });
     subctx->s = subctx->seqs[subctx->seqs.size() - 1].data();
+    ggml_vk_trace_begin(device, *subctx->p->q, *subctx->s->buffer);
 
     if (vk_instance.debug_utils_support) {
         // outermost region, one per command buffer, so the gaps between submits stand out
@@ -13566,6 +13593,7 @@ static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_ba
 }
 
 void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
+    ggml_trace_scope trace_scope("vulkan.synchronize", "wait");
     VK_LOG_DEBUG("ggml_vk_synchronize()");
 
     bool do_transfer = !ctx->compute_ctx.expired();
@@ -13634,6 +13662,7 @@ void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
         }
         ctx->compute_ctx.reset();
     }
+    ggml_vk_trace_collect(*ctx->device);
 }
 
 static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
@@ -14387,6 +14416,7 @@ static int32_t find_first_set(uint32_t x) {
 }
 
 static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+    ggml_trace_scope trace_scope("vulkan.record_graph", "record", 0, "nodes", cgraph->n_nodes);
     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
 
@@ -16564,6 +16594,7 @@ void vk_queue_handle_synchronized::submit(vk::ArrayProxy<const vk::SubmitInfo> s
     }
     std::lock_guard<std::mutex> guard(mutex);
     try {
+        ggml_trace_scope trace_scope("vulkan.driver_submit", "submit", 0, "batches", submits.size());
         queue.submit(submits, fence);
     } catch (vk::DeviceLostError &) {
         if (auto dev = device.lock()) {
@@ -16580,6 +16611,7 @@ void vk_queue_handle_unsynchronized::submit(vk::ArrayProxy<const vk::SubmitInfo>
         device_guard = std::unique_lock<std::mutex>(*device_submit_mutex);
     }
     try {
+        ggml_trace_scope trace_scope("vulkan.driver_submit", "submit", 0, "batches", submits.size());
         queue.submit(submits, fence);
     } catch (vk::DeviceLostError &) {
         if (auto dev = device.lock()) {
@@ -16596,6 +16628,7 @@ vk_device_struct::~vk_device_struct() {
     }
 
     VK_LOG_DEBUG("destroy device " << name);
+    ggml_vk_trace_destroy(*this);
 
     device.destroyFence(fence);
 

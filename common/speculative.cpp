@@ -1,3 +1,4 @@
+#include "ggml-trace.h"
 #include "speculative.h"
 
 #include "common.h"
@@ -1372,6 +1373,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     void draft(common_speculative_draft_params_vec & dparams) override {
+        ggml_trace_scope trace_scope("dspark.draft", "dspark");
         auto & ctx_dft = params.ctx_dft;
 
         batch.clear();
@@ -1535,6 +1537,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             }
 
             if (dspark_device) {
+                ggml_trace_scope trace_probs("dspark.readback_and_probs", "dspark");
                 const auto * ids = llama_dspark_device_get_tokens(ctx_dft);
                 const bool use_dense_q = dspark_dense_q && dp.result_q_dense;
                 if (use_dense_q) {
@@ -1563,6 +1566,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     }
                     result.push_back(id);
                     if (use_dense_q) {
+                        ggml_trace_scope trace_copy("dspark.copy_dense_q", "copy", 0, "bytes", (size_t) dspark_markov_vocab*sizeof(float));
                         std::memcpy(dp.result_q_dense->row(i), probs, (size_t) dspark_markov_vocab*sizeof(float));
                     } else {
                         auto & q = dp.result_q->emplace_back(dspark_markov_vocab);

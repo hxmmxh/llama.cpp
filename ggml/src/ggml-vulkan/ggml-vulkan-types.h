@@ -303,6 +303,7 @@ struct vk_command_buffer {
     vk::CommandBuffer buf;
     uint64_t use_counter = 0;
     bool in_use = false;
+    int32_t trace_slot = -1;
 };
 
 struct vk_queue;
@@ -658,7 +659,10 @@ static constexpr std::array<ggml_type, 9> lightning_indexer_k_types = {
 
 class vk_memory_logger;
 
+struct vk_trace_state;
+
 struct vk_device_struct {
+    std::shared_ptr<vk_trace_state> trace;
     std::recursive_mutex mutex;
     std::mutex queue_submit_mutex;
 
