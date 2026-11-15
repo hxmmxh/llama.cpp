@@ -149,6 +149,74 @@ static void check_sampling_edges(ggml_backend_t backend) {
     printf("sampling edges backend=%s sparse vocabulary and six boundaries PASS\n",ggml_backend_name(backend));
 }
 
+static void check_token_handoff(ggml_backend_t consumer) {
+    auto * device = ggml_backend_get_device(consumer);
+    ggml_backend_ptr producer(ggml_backend_dev_init(device, nullptr));
+    require(bool(producer), "producer backend init failed");
+    ggml_backend_event_ptr ready(ggml_backend_event_new(device));
+    if (ggml_backend_is_cpu(producer.get())) { ggml_backend_cpu_set_n_threads(producer.get(), 4); }
+    for (const int count : {1, 3, 7}) {
+        ggml_context_ptr ctx(ggml_init({64*ggml_tensor_overhead() + 2*ggml_graph_overhead_custom(32, false), nullptr, true}));
+        auto * values = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, count);
+        auto * ids = ggml_cast(ctx.get(), values, GGML_TYPE_I32);
+        auto * table = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_BF16, 8, 16);
+        auto * tokens = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, count + 1);
+        auto * rows = ggml_get_rows(ctx.get(), table, tokens);
+        auto * draft_graph = ggml_new_graph_custom(ctx.get(), 32, false);
+        auto * target_graph = ggml_new_graph_custom(ctx.get(), 32, false);
+        ggml_build_forward_expand(draft_graph, ids);
+        ggml_build_forward_expand(target_graph, rows);
+        supported(producer.get(), draft_graph);
+        supported(consumer, target_graph);
+        // Both backends use the same device, as required by device DSpark.
+        ggml_backend_buffer_ptr buffer(ggml_backend_alloc_ctx_tensors(ctx.get(), consumer));
+        require(bool(buffer), "handoff allocation failed");
+        std::vector<float> embeddings(16*8);
+        std::vector<ggml_bf16_t> packed(embeddings.size());
+        for (size_t i = 0; i < embeddings.size(); ++i) {
+            packed[i] = ggml_fp32_to_bf16(((float) i - 63.0f)*0.017f);
+            embeddings[i] = ggml_bf16_to_fp32(packed[i]);
+        }
+        ggml_backend_tensor_set(table, packed.data(), 0, ggml_nbytes(table));
+        auto * buft = ggml_backend_dev_host_buffer_type(device);
+        if (!buft) { buft = ggml_backend_cpu_buffer_type(); }
+        ggml_backend_buffer_ptr host(ggml_backend_buft_alloc_buffer(buft, ggml_nbytes(rows)));
+        require(bool(host), "handoff host allocation failed");
+        auto * output = (float *) ggml_backend_buffer_get_base(host.get());
+        for (int round = 0; round < 3; ++round) {
+            const int32_t anchor = 15 - round;
+            std::vector<float> input(count);
+            for (int i = 0; i < count; ++i) { input[i] = (i*3 + round) % 15; }
+            ggml_backend_tensor_set(values, input.data(), 0, ggml_nbytes(values));
+            ggml_backend_tensor_set(tokens, &anchor, 0, sizeof(anchor));
+            require(ggml_backend_graph_compute_async(producer.get(), draft_graph) == GGML_STATUS_SUCCESS, "producer graph failed");
+            if (ready) {
+                ggml_backend_event_record(ready.get(), producer.get());
+                ggml_backend_event_wait(consumer, ready.get());
+            } else {
+                ggml_backend_synchronize(producer.get());
+            }
+            llama_dspark_copy_tokens(producer.get(), consumer, ids, tokens, 0, 1, count);
+            require(ggml_backend_graph_compute_async(consumer, target_graph) == GGML_STATUS_SUCCESS, "consumer graph failed");
+            ggml_backend_tensor_get_async(consumer, rows, output, 0, ggml_nbytes(rows));
+            ggml_backend_synchronize(consumer);
+            if (ready) { ggml_backend_event_synchronize(ready.get()); }
+            for (int i = 0; i <= count; ++i) {
+                const int32_t id = i == 0 ? anchor : (int32_t) input[i - 1];
+                for (int j = 0; j < 8; ++j) {
+                    require(output[i*8 + j] == embeddings[id*8 + j], "device token handoff mismatch");
+                }
+            }
+        }
+        bool rejected = false;
+        try { llama_dspark_copy_tokens(producer.get(), consumer, ids, tokens, 0, 1, count + 1); }
+        catch (const std::runtime_error &) { rejected = true; }
+        require(rejected, "out-of-range token handoff accepted");
+    }
+    ggml_backend_synchronize(producer.get());
+    printf("token handoff backend=%s type=bf16 counts=1,3,7 reuse=3 exact PASS\n", ggml_backend_name(consumer));
+}
+
 int main(int argc,char ** argv) {
     try {
         ggml_backend_load_all();
@@ -156,6 +224,7 @@ int main(int argc,char ** argv) {
         ggml_backend_ptr backend(ggml_backend_dev_init(device,nullptr));require(bool(backend),"backend init failed");
         if(ggml_backend_is_cpu(backend.get())) { ggml_backend_cpu_set_n_threads(backend.get(),4); }
         check_features(backend.get());check_sampling_edges(backend.get());check_chain(backend.get(),64,32);check_chain(backend.get(),131072,256);
+        check_token_handoff(backend.get());
     } catch (const std::exception & e) { fprintf(stderr,"FAIL: %s\n",e.what());return 1; }
     return 0;
 }

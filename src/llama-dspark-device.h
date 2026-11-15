@@ -5,6 +5,7 @@
 #include "ggml-cpp.h"
 
 #include <vector>
+#include <stdexcept>
 
 struct llama_dspark_device_sampling {
     std::vector<float> uniforms;
@@ -21,6 +22,40 @@ struct llama_dspark_device_features {
     size_t n_rows = 0;
     ggml_backend_t backend = nullptr;
 };
+
+struct llama_dspark_device_tokens {
+    ggml_tensor * tensor = nullptr;
+    ggml_tensor * embeddings = nullptr;
+    ggml_backend_t backend = nullptr;
+    ggml_backend_t source_backend = nullptr;
+    ggml_backend_event_t ready = nullptr;
+    int32_t pos0 = 0;
+    size_t count = 0;
+};
+
+inline void llama_dspark_copy_tokens(
+        ggml_backend_t source_backend, ggml_backend_t backend,
+        ggml_tensor * source, ggml_tensor * destination,
+        size_t source_offset, size_t destination_offset, size_t count) {
+    if (!source || !destination || source->type != GGML_TYPE_I32 || destination->type != GGML_TYPE_I32 ||
+        !ggml_is_contiguous(source) || !ggml_is_contiguous(destination) ||
+        source_offset > (size_t) ggml_nelements(source) || count > (size_t) ggml_nelements(source) - source_offset ||
+        destination_offset > (size_t) ggml_nelements(destination) || count > (size_t) ggml_nelements(destination) - destination_offset) {
+        throw std::runtime_error("DSpark device token copy out of range");
+    }
+    if (count == 0) {
+        return;
+    }
+    ggml_context_ptr views(ggml_init({ 2*ggml_tensor_overhead(), nullptr, true }));
+    if (!views) {
+        throw std::runtime_error("DSpark token view allocation failed");
+    }
+    auto * src = ggml_view_1d(views.get(), source, count, source_offset*sizeof(int32_t));
+    auto * dst = ggml_view_1d(views.get(), destination, count, destination_offset*sizeof(int32_t));
+    ggml_backend_view_init(src);
+    ggml_backend_view_init(dst);
+    ggml_backend_tensor_copy_async(source_backend, backend, src, dst);
+}
 
 inline ggml_tensor * llama_dspark_cdf_index(ggml_context * ctx, ggml_tensor * cdf, ggml_tensor * uniform) {
     auto * mask = ggml_step(ctx, ggml_sub(ctx, cdf, uniform));

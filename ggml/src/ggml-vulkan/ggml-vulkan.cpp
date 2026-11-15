@@ -1,6 +1,47 @@
 #include "ggml-vulkan-common.h"
 #include "ggml-vulkan-trace.h"
 
+// Measured M=4 linear projections: X[4,K] * W[N,K]^T on Intel Arc 140T.
+// See docs/vulkan-s17-m4-configs.md. BF16 retains the generic backend choices.
+enum vk_m4_quant_kernel {
+    VK_M4_Q4_GENERIC,
+    VK_M4_Q4_VEC128,
+    VK_M4_Q6_BRANCHLESS,
+    VK_M4_Q6_BRANCHLESS_REUSE,
+    VK_M4_Q6_FIVE_REUSE,
+    VK_M4_Q6_GENERIC,
+    VK_M4_Q8_GENERIC,
+    VK_M4_Q8_K16,
+};
+
+struct vk_m4_quant_config {
+    ggml_type type;
+    uint32_t k, n, rows, sg, wg;
+    vk_m4_quant_kernel kernel;
+};
+
+static constexpr vk_m4_quant_config vk_m4_quant_s17_configs[] = {
+    // type               K       N     rows  SG   WG   kernel
+    {GGML_TYPE_Q4_K ,  2048,   3072,    2,   8,    8, VK_M4_Q4_VEC128}, // qkv
+    {GGML_TYPE_Q6_K ,  2048,   3072,    2,   8,    8, VK_M4_Q6_FIVE_REUSE}, // qkv
+    {GGML_TYPE_Q8_0 ,  2048,   3072,    4,   8,   16, VK_M4_Q8_K16}, // qkv
+    {GGML_TYPE_Q4_K ,  2048,      8,    1,   8,   64, VK_M4_Q4_GENERIC}, // head_gate
+    {GGML_TYPE_Q6_K ,  2048,      8,    1,  16,  256, VK_M4_Q6_GENERIC}, // head_gate
+    {GGML_TYPE_Q8_0 ,  2048,      8,    2,   8,  128, VK_M4_Q8_GENERIC}, // head_gate
+    {GGML_TYPE_Q4_K ,  2048,   2048,    2,   8,    8, VK_M4_Q4_VEC128}, // attn_out
+    {GGML_TYPE_Q6_K ,  2048,   2048,    2,   8,    8, VK_M4_Q6_FIVE_REUSE}, // attn_out
+    {GGML_TYPE_Q8_0 ,  2048,   2048,    4,   8,    8, VK_M4_Q8_K16}, // attn_out
+    {GGML_TYPE_Q4_K ,  2048,   6656,    2,  16,   16, VK_M4_Q4_VEC128}, // fc1
+    {GGML_TYPE_Q6_K ,  2048,   6656,    4,   8,    8, VK_M4_Q6_BRANCHLESS}, // fc1
+    {GGML_TYPE_Q8_0 ,  2048,   6656,    8,   8,   32, VK_M4_Q8_GENERIC}, // fc1
+    {GGML_TYPE_Q4_K ,  6656,   2048,    4,   8,   16, VK_M4_Q4_VEC128}, // fc2
+    {GGML_TYPE_Q6_K ,  6656,   2048,    2,   8,    8, VK_M4_Q6_FIVE_REUSE}, // fc2
+    {GGML_TYPE_Q8_0 ,  6656,   2048,    8,   8,   32, VK_M4_Q8_GENERIC}, // fc2
+    {GGML_TYPE_Q4_K ,  2048, 131072,    2,  16,   16, VK_M4_Q4_VEC128}, // lm_head
+    {GGML_TYPE_Q6_K ,  2048, 131072,    4,  16,   32, VK_M4_Q6_BRANCHLESS_REUSE}, // lm_head
+    {GGML_TYPE_Q8_0 ,  2048, 131072,    4,   8,    8, VK_M4_Q8_K16}, // lm_head
+};
+
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
 
@@ -2045,12 +2086,93 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     if (device->vendor_id == VK_VENDOR_ID_INTEL && device->integer_dot_product && device->subgroup_arithmetic &&
         device->subgroup_size_control && device->subgroup_min_size <= 8 && device->subgroup_max_size >= 8 &&
         device->subgroup_require_full_support && getenv("GGML_VK_DISABLE_M4_QUANT_LOAD_OPT") == nullptr) {
-        const size_t lengths[] = {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_len, mul_mat_vec_q6_k_q8_1_f32_m4_word32_len, mul_mat_vec_q6_k_q8_1_f32_m4_branchless32_len, mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_len};
-        const void * data[] = {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_data, mul_mat_vec_q6_k_q8_1_f32_m4_word32_data, mul_mat_vec_q6_k_q8_1_f32_m4_branchless32_data, mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_data};
-        const char * names[] = {"mul_mat_vec_q4_k_q8_1_f32_m4_vec128_rows2", "mul_mat_vec_q6_k_q8_1_f32_m4_word32_rows2", "mul_mat_vec_q6_k_q8_1_f32_m4_branchless32_rows4", "mul_mat_vec_q8_0_q8_1_f32_m4_rows4"};
-        const uint32_t rows[] = {2, 2, 4, 4};
-        for (uint32_t i = 0; i < 4; ++i) {
+        const size_t lengths[] = {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_len, mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_len, mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_len, mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_len, mul_mat_vec_q8_0_q8_1_f32_m4_k16_len};
+        const void * data[] = {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_data, mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_data, mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_data, mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_data, mul_mat_vec_q8_0_q8_1_f32_m4_k16_data};
+        const char * names[] = {"mul_mat_vec_q4_k_q8_1_f32_m4_vec128_rows2", "mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_rows2", "mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_rows4", "mul_mat_vec_q8_0_q8_1_f32_m4_rows4", "mul_mat_vec_q8_0_q8_1_f32_m4_k16_rows4"};
+        const uint32_t rows[] = {2, 2, 4, 4, 4};
+        for (uint32_t i = 0; i < 5; ++i) {
             ggml_vk_create_pipeline(device, device->pipeline_m4_quant[i], names[i], lengths[i], data[i], "main", 5, sizeof(vk_mat_vec_push_constants), {rows[i], 1, 1}, {8, rows[i], 4}, 1, true, true, 8);
+        }
+
+        device->pipeline_m4_quant_s17.resize(std::size(vk_m4_quant_s17_configs));
+        for (size_t i = 0; i < std::size(vk_m4_quant_s17_configs); ++i) {
+            const auto & config = vk_m4_quant_s17_configs[i];
+            const bool single = config.sg == config.wg;
+            if (config.sg < device->subgroup_min_size || config.sg > device->subgroup_max_size ||
+                config.wg > device->properties.limits.maxComputeWorkGroupInvocations ||
+                config.wg > device->properties.limits.maxComputeWorkGroupSize[0] ||
+                config.wg / config.sg > device->max_compute_workgroup_subgroups ||
+                (!single && uint64_t(4) * config.rows * config.wg * sizeof(float) > device->properties.limits.maxComputeSharedMemorySize)) {
+                continue;
+            }
+            auto & pipeline = device->pipeline_m4_quant_s17[i];
+            // Share pipelines when different projection shapes use the same configuration.
+            bool shared = false;
+            for (size_t j = 0; j < i; ++j) {
+                const auto & previous = vk_m4_quant_s17_configs[j];
+                if (config.kernel == previous.kernel && config.rows == previous.rows &&
+                    config.sg == previous.sg && config.wg == previous.wg) {
+                    if (!pipeline) { pipeline = device->pipeline_m4_quant_s17[j]; }
+                    shared = true;
+                    break;
+                }
+            }
+            if (shared) {
+                continue;
+            }
+            if (config.sg == 8 && config.wg == 8) {
+                if (config.kernel == VK_M4_Q4_VEC128 && config.rows == 2) {
+                    if (!pipeline) { pipeline = device->pipeline_m4_quant[0]; }
+                    shared = true;
+                } else if (config.kernel == VK_M4_Q6_FIVE_REUSE && config.rows == 2) {
+                    if (!pipeline) { pipeline = device->pipeline_m4_quant[1]; }
+                    shared = true;
+                } else if (config.kernel == VK_M4_Q8_K16 && config.rows == 4) {
+                    if (!pipeline) { pipeline = device->pipeline_m4_quant[4]; }
+                    shared = true;
+                }
+            }
+            if (shared) {
+                continue;
+            }
+            // Revisit owned pipelines on every load: the backend compiles them lazily.
+            const size_t module_lengths[][2] = {
+                {mul_mat_vec_q4_k_q8_1_f32_subgroup_no_shmem_len, mul_mat_vec_q4_k_q8_1_f32_subgroup_len},
+                {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_len, mul_mat_vec_q4_k_q8_1_f32_m4_vec128_subgroup_len},
+                {mul_mat_vec_q6_k_q8_1_f32_m4_branchless_len, 0},
+                {0, mul_mat_vec_q6_k_q8_1_f32_m4_branchless_reuse_subgroup_len},
+                {mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_len, 0},
+                {mul_mat_vec_q6_k_q8_1_f32_subgroup_no_shmem_len, mul_mat_vec_q6_k_q8_1_f32_subgroup_len},
+                {mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_len, mul_mat_vec_q8_0_q8_1_f32_subgroup_len},
+                {mul_mat_vec_q8_0_q8_1_f32_m4_k16_len, mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup_len},
+            };
+            const void * module_data[][2] = {
+                {mul_mat_vec_q4_k_q8_1_f32_subgroup_no_shmem_data, mul_mat_vec_q4_k_q8_1_f32_subgroup_data},
+                {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_data, mul_mat_vec_q4_k_q8_1_f32_m4_vec128_subgroup_data},
+                {mul_mat_vec_q6_k_q8_1_f32_m4_branchless_data, nullptr},
+                {nullptr, mul_mat_vec_q6_k_q8_1_f32_m4_branchless_reuse_subgroup_data},
+                {mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_data, nullptr},
+                {mul_mat_vec_q6_k_q8_1_f32_subgroup_no_shmem_data, mul_mat_vec_q6_k_q8_1_f32_subgroup_data},
+                {mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_data, mul_mat_vec_q8_0_q8_1_f32_subgroup_data},
+                {mul_mat_vec_q8_0_q8_1_f32_m4_k16_data, mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup_data},
+            };
+            const char * module_names[][2] = {
+                {"mul_mat_vec_q4_k_q8_1_f32_subgroup_no_shmem", "mul_mat_vec_q4_k_q8_1_f32_subgroup"},
+                {"mul_mat_vec_q4_k_q8_1_f32_m4_vec128", "mul_mat_vec_q4_k_q8_1_f32_m4_vec128_subgroup"},
+                {"mul_mat_vec_q6_k_q8_1_f32_m4_branchless", nullptr},
+                {nullptr, "mul_mat_vec_q6_k_q8_1_f32_m4_branchless_reuse_subgroup"},
+                {"mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse", nullptr},
+                {"mul_mat_vec_q6_k_q8_1_f32_subgroup_no_shmem", "mul_mat_vec_q6_k_q8_1_f32_subgroup"},
+                {"mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem", "mul_mat_vec_q8_0_q8_1_f32_subgroup"},
+                {"mul_mat_vec_q8_0_q8_1_f32_m4_k16", "mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup"},
+            };
+            const uint32_t reduction = single ? 0 : 1;
+            GGML_ASSERT(module_data[config.kernel][reduction] != nullptr);
+            const std::string name = std::string(module_names[config.kernel][reduction]) +
+                "_rows" + std::to_string(config.rows) + "_sg" + std::to_string(config.sg) + "_wg" + std::to_string(config.wg);
+            ggml_vk_create_pipeline(device, pipeline, name.c_str(), module_lengths[config.kernel][reduction],
+                module_data[config.kernel][reduction], "main", 5, sizeof(vk_mat_vec_push_constants),
+                {config.rows, 1, 1}, {config.wg, config.rows, 4}, 1, true, true, config.sg);
         }
     }
 #endif
@@ -4576,6 +4698,7 @@ vk_device ggml_vk_get_device(size_t idx) {
         if (device->subgroup_size_control) {
             device->subgroup_min_size = subgroup_size_control_props.minSubgroupSize;
             device->subgroup_max_size = subgroup_size_control_props.maxSubgroupSize;
+            device->max_compute_workgroup_subgroups = subgroup_size_control_props.maxComputeWorkgroupSubgroups;
             device_extensions.push_back("VK_EXT_subgroup_size_control");
         }
 
@@ -5613,6 +5736,20 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context * 
         if (a_type == GGML_TYPE_Q8_0 && ctx->device->pipeline_m4_quant[3]) {
             return ctx->device->pipeline_m4_quant[3];
         }
+    }
+
+    if (b_type == GGML_TYPE_Q8_1 && num_cols == 4 && !ctx->device->pipeline_m4_quant_s17.empty()) {
+        for (size_t i = 0; i < std::size(vk_m4_quant_s17_configs); ++i) {
+            const auto & config = vk_m4_quant_s17_configs[i];
+            if (a_type == config.type && k == config.k && m == config.n && ctx->device->pipeline_m4_quant_s17[i]) {
+                return ctx->device->pipeline_m4_quant_s17[i];
+            }
+        }
+    }
+
+    if (a_type == GGML_TYPE_Q8_0 && b_type == GGML_TYPE_Q8_1 && num_cols == 4 &&
+        k == 2048 && (m == 2048 || m == 131072) && ctx->device->pipeline_m4_quant[4]) {
+        return ctx->device->pipeline_m4_quant[4];
     }
 
     GGML_ASSERT(b_type == GGML_TYPE_F32 || b_type == GGML_TYPE_F16 || b_type == GGML_TYPE_Q8_1);

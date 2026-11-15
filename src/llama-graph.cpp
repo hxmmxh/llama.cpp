@@ -95,7 +95,29 @@ void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
         const int64_t n_tokens = ubatch->n_tokens;
 
-        ggml_backend_tensor_set(tokens, ubatch->token, 0, n_tokens*ggml_element_size(tokens));
+        if (dspark_tokens && dspark_tokens->tensor) {
+            const auto & input = *dspark_tokens;
+            const int64_t offset = (int64_t) ubatch->pos[0] - input.pos0;
+            if (ubatch->n_seqs_unq != 1 || ubatch->is_mixed() || offset < 0 ||
+                (uint64_t) offset > input.count || (uint64_t) n_tokens > input.count + 1 - offset) {
+                throw std::runtime_error("DSpark device tokens require one contiguous verification batch");
+            }
+            for (int64_t i = 0; i < n_tokens; ++i) {
+                if (ubatch->pos[i] != input.pos0 + offset + i) {
+                    throw std::runtime_error("DSpark verification positions are not contiguous");
+                }
+            }
+            // Only the anchor comes from the host. Draft IDs stay on device.
+            const size_t anchor = offset == 0 ? 1 : 0;
+            if (anchor) {
+                ggml_backend_tensor_set(tokens, ubatch->token, 0, sizeof(llama_token));
+            }
+            ggml_backend_event_wait(input.backend, input.ready);
+            llama_dspark_copy_tokens(input.source_backend, input.backend, input.tensor, tokens,
+                    offset + anchor - 1, anchor, n_tokens - anchor);
+        } else {
+            ggml_backend_tensor_set(tokens, ubatch->token, 0, n_tokens*ggml_element_size(tokens));
+        }
     }
 
     if (ubatch->embd && embd && !ubatch->is_mixed()) {
@@ -2670,6 +2692,7 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
     assert(n_embd_inp >= n_embd);
 
     auto inp = std::make_unique<llm_graph_input_embd>(n_embd_inp);
+    inp->dspark_tokens = cparams.dspark_device_tokens_active ? cparams.dspark_device_tokens : nullptr;
 
     // mixed path (ubatch.is_mixed()): set_rows the token rows into a copy of the embd rows, with its own inputs as select branches must not share tensors
     // TODO: use inp->tokens and inp->embd once ggml_build_forward_select allows it
@@ -2692,6 +2715,10 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
         ggml_set_input(inp->tokens);
         res->t_inp_tokens = inp->tokens;
 
+        if (inp->dspark_tokens) {
+            ggml_backend_sched_set_tensor_backend(sched, inp->tokens, inp->dspark_tokens->backend);
+        }
+
         inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_inp, ubatch.n_tokens);
         cb(inp->embd, "inp_embd", -1);
         ggml_set_input(inp->embd);
@@ -2707,7 +2734,13 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
     // we use ggml_build_forward_order to make the GET_ROWS ops stick at the beginning of the compute graph
     // this way the embeddings remain in the host buffer, and the GET_ROWS run before any other computations
     {
-        embd0 = ggml_get_rows(ctx0, tok_embd, inp->tokens);
+        embd0 = ggml_get_rows(ctx0, inp->dspark_tokens ? inp->dspark_tokens->embeddings : tok_embd, inp->tokens);
+        if (inp->dspark_tokens) {
+            if (!ggml_backend_supports_op(inp->dspark_tokens->backend, embd0)) {
+                throw std::runtime_error("DSpark device token embedding lookup is unsupported");
+            }
+            ggml_backend_sched_set_tensor_backend(sched, embd0, inp->dspark_tokens->backend);
+        }
         ggml_build_forward_order(gf, embd0);
 
         embd1 = inp->embd;

@@ -12,7 +12,9 @@
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
-#if defined(DATA_A_Q2_0) || defined(DATA_A_QUANT_K)
+#if defined(DATA_A_Q8_0) && defined(MMVQ_Q8_K_STEP)
+#define K_PER_ITER MMVQ_Q8_K_STEP
+#elif defined(DATA_A_Q2_0) || defined(DATA_A_QUANT_K)
 #define K_PER_ITER 16
 #elif defined(DATA_A_QUANT_LEGACY) || defined(DATA_A_MXFP4)
 #define K_PER_ITER 8
@@ -33,6 +35,14 @@ vec2 cache_b_ds;
 #include "mul_mat_vecq_funcs.glsl"
 
 void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint num_rows, const uint col, const uint b_qs_idx) {
+#if defined(MMVQ_Q6K_REUSE4)
+    mmvq_prepared_q6 prepared_a[NUM_ROWS];
+    uint a_row = first_row * p.ncols;
+    [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+        prepared_a[n] = mmvq_prepare_q6((a_row + col) / QUANT_K_Q8_1 + a_offset, b_qs_idx);
+        a_row += p.ncols;
+    }
+#endif
     [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
         // Preload data_b block
         const uint b_block_idx = (j*p.batch_stride_b + col) / QUANT_K_Q8_1 + b_offset;
@@ -67,12 +77,18 @@ void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const
 #endif
 #endif
 
+#if !defined(MMVQ_Q6K_REUSE4)
         uint ibi = first_row*p.ncols;
+#endif
         [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+#if defined(MMVQ_Q6K_REUSE4)
+            temp[j][n] += mmvq_dot_q6_prepared(prepared_a[n]);
+#else
             const uint a_block_idx = (ibi + col)/QUANT_K_Q8_1 + a_offset;
             ibi += p.ncols;
 
             temp[j][n] += mmvq_dot_product(a_block_idx, b_qs_idx);
+#endif
         }
     }
 }

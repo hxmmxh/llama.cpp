@@ -820,9 +820,24 @@ void process_shaders() {
                 if (tname == "q4_k") {
                     string_to_spv("mul_mat_vec_q4_k_q8_1_f32_m4_vec128", "mul_mat_vecq.comp", merge_maps(load_dict, {{"MMVQ_Q4K_VEC128", "1"}}));
                 } else {
-                    string_to_spv("mul_mat_vec_q6_k_q8_1_f32_m4_word32", "mul_mat_vecq.comp", merge_maps(load_dict, {{"MMVQ_Q6K_WORD32", "1"}}));
-                    string_to_spv("mul_mat_vec_q6_k_q8_1_f32_m4_branchless32", "mul_mat_vecq.comp", merge_maps(load_dict, {{"MMVQ_Q6K_WORD32", "1"}, {"MMVQ_Q6K_BRANCHLESS", "1"}}));
+                    string_to_spv("mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse", "mul_mat_vecq.comp", merge_maps(load_dict, {{"MMVQ_Q6K_WORD32", "1"}, {"MMVQ_Q6K_FIVE_WORDS", "1"}, {"MMVQ_Q6K_REUSE4", "1"}}));
                 }
+            }
+            if (tname == "q8_0") {
+                const auto k16_dict = merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}, {"MMVQ_Q8_K_STEP", "16"}});
+                string_to_spv("mul_mat_vec_q8_0_q8_1_f32_m4_k16", "mul_mat_vecq.comp", k16_dict);
+            }
+            if (tname == "q4_k") {
+                string_to_spv("mul_mat_vec_q4_k_q8_1_f32_m4_vec128_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}, {"MMVQ_Q4K_VEC128", "1"}}));
+            }
+            if (tname == "q6_k") {
+                string_to_spv("mul_mat_vec_q6_k_q8_1_f32_m4_branchless", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}, {"MMVQ_Q6K_WORD32", "1"}, {"MMVQ_Q6K_BRANCHLESS", "1"}}));
+            }
+            if (tname == "q6_k") {
+                string_to_spv("mul_mat_vec_q6_k_q8_1_f32_m4_branchless_reuse_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}, {"MMVQ_Q6K_WORD32", "1"}, {"MMVQ_Q6K_BRANCHLESS", "1"}, {"MMVQ_Q6K_REUSE4", "1"}}));
+            }
+            if (tname == "q8_0") {
+                string_to_spv("mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}, {"MMVQ_Q8_K_STEP", "16"}}));
             }
             string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}}));
             string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));

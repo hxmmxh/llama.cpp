@@ -83,6 +83,9 @@ struct common_speculative_draft_params {
 
     // Optional owning dense output, used only by device DSpark when explicitly enabled.
     common_sampler_draft_probs * result_q_dense = nullptr;
+
+    // Opt in to device verification; result holds placeholders until draft_finish().
+    bool allow_async = false;
 };
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
@@ -95,6 +98,9 @@ bool common_speculative_process(common_speculative * spec, const common_batch & 
 
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);
+
+// Collect deferred results before process(), sampling, or slot teardown.
+void common_speculative_draft_finish(common_speculative * spec);
 
 // informs the speculative context that n_accepted tokens were accepted by the target model
 void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);

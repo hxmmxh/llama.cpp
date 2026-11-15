@@ -60,6 +60,9 @@ LLAMA_API void llama_dspark_device_set_features(llama_context * target, llama_co
 LLAMA_API void llama_dspark_device_set_sampling(llama_context * draft, const float * uniforms, size_t count, float temperature);
 LLAMA_API const llama_token * llama_dspark_device_get_tokens(llama_context * draft);
 LLAMA_API const float * llama_dspark_device_get_probs(llama_context * draft, int32_t index);
+// Bind the next verification batch to device tokens; collect before reusing the draft graph.
+LLAMA_API void llama_dspark_device_set_target_tokens(llama_context * target, llama_context * draft, llama_pos pos0, size_t count);
+LLAMA_API void llama_dspark_device_clear_target_tokens(llama_context * target);
 
 // Descriptor for constructing a mock model for quantization testing.
 struct llama_quant_model_desc {

@@ -1405,6 +1405,43 @@ bool llama_context::init_dspark_device(llama_context & target) {
     target.synchronize();
     dspark_sampling.backend = backend;
     dspark_features.backend = backend;
+    const char * async_env = std::getenv("LLAMA_DSPARK_ASYNC");
+    if (async_env && std::strcmp(async_env, "1") == 0) {
+        if (target.model.arch != LLM_ARCH_SPARK2_5) {
+            throw std::runtime_error("DSpark asynchronous handoff currently requires a Spark target");
+        }
+        target.dspark_input_tokens.backend = find_backend(target);
+        target.cparams.dspark_device_tokens = &target.dspark_input_tokens;
+        auto * token_embeddings = target.model.tok_embd;
+        if (!token_embeddings) {
+            throw std::runtime_error("DSpark asynchronous handoff requires token embeddings");
+        }
+        auto * target_backend = target.dspark_input_tokens.backend;
+        if (ggml_backend_buffer_get_type(token_embeddings->buffer) == ggml_backend_get_default_buffer_type(target_backend)) {
+            target.dspark_input_tokens.embeddings = token_embeddings;
+        } else {
+            // CPU embedding lookup cannot consume an input that is still pending on the GPU.
+            target.dspark_token_embd_ctx.reset(ggml_init({ ggml_tensor_overhead(), nullptr, true }));
+            if (!target.dspark_token_embd_ctx) {
+                throw std::runtime_error("DSpark token embedding metadata allocation failed");
+            }
+            auto * cached = ggml_dup_tensor(target.dspark_token_embd_ctx.get(), token_embeddings);
+            ggml_set_name(cached, "dspark_token_embeddings");
+            target.dspark_token_embd_buffer.reset(ggml_backend_alloc_ctx_tensors(target.dspark_token_embd_ctx.get(), target_backend));
+            if (!target.dspark_token_embd_buffer) {
+                throw std::runtime_error("DSpark device token embedding allocation failed");
+            }
+            ggml_backend_buffer_set_usage(target.dspark_token_embd_buffer.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            ggml_backend_tensor_copy(token_embeddings, cached);
+            target.dspark_input_tokens.embeddings = cached;
+            LLAMA_LOG_INFO("%s: DSpark token embedding cache: %s %s, %.2f MiB\n", __func__,
+                    ggml_backend_name(target_backend), ggml_type_name(cached->type), ggml_nbytes(cached)/(1024.0*1024.0));
+        }
+        dspark_tokens_ready.reset(ggml_backend_event_new(device));
+        if (!dspark_tokens_ready) {
+            throw std::runtime_error("DSpark asynchronous handoff requires backend events");
+        }
+    }
     dspark_features.capacity = target.cparams.n_batch;
     cparams.dspark_device_sampling = &dspark_sampling;
     cparams.dspark_device_features = &dspark_features;
@@ -1420,6 +1457,13 @@ void llama_context::reset_dspark_device(llama_context & target) {
     cparams.dspark_device_sampling = nullptr;
     cparams.dspark_device_features = nullptr;
     target.cparams.dspark_device_extract = false;
+    target.cparams.dspark_device_tokens = nullptr;
+    target.cparams.dspark_device_tokens_active = false;
+    target.dspark_input_tokens = {};
+    target.dspark_token_embd_buffer.reset();
+    target.dspark_token_embd_ctx.reset();
+    dspark_tokens_ready.reset();
+    dspark_device_token_tensor = nullptr;
     dspark_features.layers.clear();
     target.dspark_layers.clear();
     target.dspark_batch_idxs.clear();
@@ -1483,9 +1527,9 @@ void llama_context::set_dspark_device_sampling(const float * uniforms, size_t co
 const llama_token * llama_context::get_dspark_device_tokens() {
     ggml_trace_scope trace_scope("dspark.get_tokens", "dspark");
     synchronize();
-    GGML_ASSERT(cparams.dspark_device_sampling && !dspark_tokens.empty());
+    GGML_ASSERT(cparams.dspark_device_sampling && dspark_tokens.has_data());
     output_reorder();
-    return dspark_tokens.data();
+    return dspark_tokens.data;
 }
 
 const float * llama_context::get_dspark_device_probs(int32_t index) {
@@ -1493,10 +1537,45 @@ const float * llama_context::get_dspark_device_probs(int32_t index) {
     synchronize();
     output_reorder();
     const size_t vocab = model.vocab.n_tokens();
-    if (!cparams.dspark_device_sampling || index < 0 || (size_t) index >= dspark_probs.size()/vocab) {
+    if (!cparams.dspark_device_sampling || index < 0 || (size_t) index >= dspark_probs.size/vocab) {
         throw std::runtime_error("DSpark device probability index out of range");
     }
-    return dspark_probs.data() + (size_t) index*vocab;
+    return dspark_probs.data + (size_t) index*vocab;
+}
+
+void llama_context::set_dspark_device_target_tokens(llama_context & target, llama_pos pos0, size_t count) {
+    if (!cparams.dspark_device_sampling || !dspark_device_token_tensor || !dspark_tokens_ready ||
+        !target.cparams.dspark_device_tokens || target.dspark_input_tokens.tensor ||
+        count == 0 || count > dspark_tokens.size || count >= target.cparams.n_ubatch ||
+        pos0 < 0 || count > (size_t) (INT32_MAX - pos0) || !output_swaps.empty()) {
+        throw std::runtime_error("DSpark asynchronous token handoff is unavailable or out of range");
+    }
+    ggml_backend_event_record(dspark_tokens_ready.get(), dspark_sampling.backend);
+    auto & input = target.dspark_input_tokens;
+    input.tensor = dspark_device_token_tensor;
+    input.source_backend = dspark_sampling.backend;
+    input.ready = dspark_tokens_ready.get();
+    input.pos0 = pos0;
+    input.count = count;
+    target.cparams.dspark_device_tokens_active = true;
+}
+
+void llama_dspark_device_set_target_tokens(llama_context * target, llama_context * draft, llama_pos pos0, size_t count) {
+    draft->set_dspark_device_target_tokens(*target, pos0, count);
+}
+
+void llama_dspark_device_clear_target_tokens(llama_context * target) {
+    target->clear_dspark_device_target_tokens();
+}
+
+void llama_context::clear_dspark_device_target_tokens() {
+    if (dspark_input_tokens.tensor) {
+        synchronize();
+        // Recycle backend events only after the consumer has finished using them.
+        ggml_backend_event_synchronize(dspark_input_tokens.ready);
+        dspark_input_tokens.tensor = nullptr;
+        cparams.dspark_device_tokens_active = false;
+    }
 }
 
 const float * llama_dspark_device_get_probs(llama_context * draft, int32_t index) {
@@ -2327,13 +2406,31 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         if (res->t_dspark_tokens) {
             ggml_trace_scope trace_readback("dspark.enqueue_readback", "readback");
             auto * tokens = res->t_dspark_tokens;
-            dspark_tokens.resize(ggml_nelements(tokens));
-            auto * backend = ggml_backend_sched_get_tensor_backend(sched.get(), tokens);
-            ggml_backend_tensor_get_async(backend, tokens, dspark_tokens.data(), 0, ggml_nbytes(tokens));
             auto * probs = res->t_dspark_probs;
-            dspark_probs.resize(ggml_nelements(probs));
+            const size_t token_bytes = ggml_nbytes(tokens);
+            const size_t prob_bytes = ggml_nbytes(probs);
+            if (prob_bytes > SIZE_MAX - token_bytes) {
+                throw std::runtime_error("DSpark output buffer size overflow");
+            }
+            const size_t bytes = token_bytes + prob_bytes;
+            if (!dspark_output || ggml_backend_buffer_get_size(dspark_output.get()) < bytes) {
+                synchronize();
+                auto * device = ggml_backend_get_device(dspark_sampling.backend);
+                auto * buft = ggml_backend_dev_host_buffer_type(device);
+                if (!buft) { buft = ggml_backend_cpu_buffer_type(); }
+                dspark_output.reset(ggml_backend_buft_alloc_buffer(buft, bytes));
+                if (!dspark_output) { throw std::runtime_error("DSpark host output allocation failed"); }
+                LLAMA_LOG_INFO("%s: DSpark readback buffer: %s, %.2f MiB\n", __func__,
+                        ggml_backend_buffer_name(dspark_output.get()), bytes/(1024.0*1024.0));
+            }
+            auto * base = (uint8_t *) ggml_backend_buffer_get_base(dspark_output.get());
+            dspark_tokens = {(llama_token *) base, (size_t) ggml_nelements(tokens)};
+            dspark_probs = {(float *) (base + token_bytes), (size_t) ggml_nelements(probs)};
+            dspark_device_token_tensor = tokens;
+            auto * backend = ggml_backend_sched_get_tensor_backend(sched.get(), tokens);
+            ggml_backend_tensor_get_async(backend, tokens, dspark_tokens.data, 0, token_bytes);
             backend = ggml_backend_sched_get_tensor_backend(sched.get(), probs);
-            ggml_backend_tensor_get_async(backend, probs, dspark_probs.data(), 0, ggml_nbytes(probs));
+            ggml_backend_tensor_get_async(backend, probs, dspark_probs.data, 0, prob_bytes);
         }
 
         // [TAG_EXTRACT_TARGET_EMBEDDINGS]
@@ -2675,10 +2772,10 @@ void llama_context::output_reorder() {
         const uint64_t i1 = output_swaps[s].i1;
 
         if (cparams.dspark_device_sampling) {
-            GGML_ASSERT(i0 < dspark_tokens.size() && i1 < dspark_tokens.size());
-            std::swap(dspark_tokens[i0], dspark_tokens[i1]);
+            GGML_ASSERT(i0 < dspark_tokens.size && i1 < dspark_tokens.size);
+            std::swap(dspark_tokens.data[i0], dspark_tokens.data[i1]);
             for (uint64_t k = 0; k < n_vocab; ++k) {
-                std::swap(dspark_probs[i0*n_vocab + k], dspark_probs[i1*n_vocab + k]);
+                std::swap(dspark_probs.data[i0*n_vocab + k], dspark_probs.data[i1*n_vocab + k]);
             }
         }
         if (logits.size > 0) {

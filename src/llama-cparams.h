@@ -38,6 +38,8 @@ struct llama_cparams {
     bool embeddings_nextn_masked; // extract for only rows where batch.logits != 0
     llama_dspark_device_sampling * dspark_device_sampling = nullptr;
     llama_dspark_device_features * dspark_device_features = nullptr;
+    llama_dspark_device_tokens * dspark_device_tokens = nullptr;
+    bool dspark_device_tokens_active = false;
     bool dspark_device_extract = false;
     bool dspark_probabilistic = false; // expose unconditioned logits for CPU-side DSpark sampling
     bool causal_attn;

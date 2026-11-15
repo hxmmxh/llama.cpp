@@ -99,6 +99,8 @@ struct llama_context {
     void set_dspark_device_sampling(const float * uniforms, size_t count, float temperature);
     const llama_token * get_dspark_device_tokens();
     const float * get_dspark_device_probs(int32_t index);
+    void set_dspark_device_target_tokens(llama_context & target, llama_pos pos0, size_t count);
+    void clear_dspark_device_target_tokens();
 
     llama_token * get_sampled_tokens() const;
     llama_token   get_sampled_token_ith(int32_t idx);
@@ -311,8 +313,14 @@ private:
     llama_cparams cparams;
     llama_dspark_device_sampling dspark_sampling;
     llama_dspark_device_features dspark_features;
-    std::vector<llama_token> dspark_tokens;
-    std::vector<float> dspark_probs;
+    ggml_backend_buffer_ptr dspark_output;
+    buffer_view<llama_token> dspark_tokens = {nullptr, 0};
+    buffer_view<float> dspark_probs = {nullptr, 0};
+    llama_dspark_device_tokens dspark_input_tokens;
+    ggml_context_ptr dspark_token_embd_ctx;
+    ggml_backend_buffer_ptr dspark_token_embd_buffer;
+    ggml_backend_event_ptr dspark_tokens_ready;
+    ggml_tensor * dspark_device_token_tensor = nullptr;
     struct dspark_layer_buffer {
         ggml_context_ptr ctx;
         ggml_backend_buffer_ptr buffer;

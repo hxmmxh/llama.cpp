@@ -216,6 +216,8 @@ struct common_speculative_impl {
 
     virtual void draft(common_speculative_draft_params_vec & dparams) = 0;
 
+    virtual void draft_finish(common_speculative_draft_params_vec & /*dparams*/) {}
+
     virtual void accept(llama_seq_id seq_id, uint16_t n_accepted, bool is_other) = 0;
 
     // (optional) serialize/restore per-seq internal state (e.g. eagle3's deferred boundary).
@@ -1030,6 +1032,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     bool dspark_probabilistic = false;
     bool dspark_device = false;
     bool dspark_dense_q = false;
+    bool dspark_async = false;
+    bool dspark_pending = false;
+    bool dspark_async_logged = false;
     std::mt19937 dspark_device_rng;
     uint32_t dspark_device_seed = LLAMA_DEFAULT_SEED;
     bool dspark_device_reseed = true;
@@ -1093,6 +1098,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 llama_dspark_device_init(ctx_tgt, ctx_dft);
                 const char * dense_q_env = std::getenv("LLAMA_DSPARK_DENSE_Q");
                 dspark_dense_q = dense_q_env && std::strcmp(dense_q_env, "1") == 0;
+                const char * async_env = std::getenv("LLAMA_DSPARK_ASYNC");
+                dspark_async = async_env && std::strcmp(async_env, "1") == 0;
+                if (dspark_async) {
+                    LOG_INF("%s: DSpark asynchronous submission and device token handoff enabled\n", __func__);
+                }
             } else {
                 dspark_markov_w1.resize(n_w1);
                 std::vector<float> dspark_markov_w2(n_w2);
@@ -1372,6 +1382,63 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         return true;
     }
 
+    void collect_dspark(common_speculative_draft_params & dp, int32_t beg, int32_t n_block_tokens) {
+        ggml_trace_scope trace_probs("dspark.readback_and_probs", "dspark");
+        const auto * ids = llama_dspark_device_get_tokens(params.ctx_dft);
+        auto & result = *dp.result;
+        result.clear();
+        const bool use_dense_q = dspark_dense_q && dp.result_q_dense;
+        if (use_dense_q) {
+            dp.result_q_dense->resize(n_block_tokens, dspark_markov_vocab);
+        }
+        for (int32_t i = 0; i < n_block_tokens; ++i) {
+            const int32_t idx = beg + i;
+            const float * probs = llama_dspark_device_get_probs(params.ctx_dft, idx);
+            const llama_token id = ids[idx];
+            if (id < 0 || id >= dspark_markov_vocab || !std::isfinite(probs[id]) || probs[id] <= 0.0f) {
+                throw std::runtime_error("invalid DSpark device sample");
+            }
+            if (dspark_device_validate) {
+                double sum = 0.0, prefix = 0.0;
+                for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
+                    if (!std::isfinite(probs[token]) || probs[token] < 0.0f) {
+                        throw std::runtime_error("DSpark device probability validation failed");
+                    }
+                    sum += probs[token];
+                    if (token < id) { prefix += probs[token]; }
+                }
+                const float u = dspark_device_uniforms.at(idx);
+                if (std::abs(sum - 1.0) > 2e-5 || u < prefix - 2e-6 || u > prefix + probs[id] + 2e-6) {
+                    throw std::runtime_error("DSpark device CDF validation failed");
+                }
+            }
+            result.push_back(id);
+            if (use_dense_q) {
+                ggml_trace_scope trace_copy("dspark.copy_dense_q", "copy", 0, "bytes", (size_t) dspark_markov_vocab*sizeof(float));
+                std::memcpy(dp.result_q_dense->row(i), probs, (size_t) dspark_markov_vocab*sizeof(float));
+            } else {
+                auto & q = dp.result_q->emplace_back(dspark_markov_vocab);
+                for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
+                    q[token] = { token, 0.0f, probs[token] };
+                }
+            }
+        }
+    }
+
+    void draft_finish(common_speculative_draft_params_vec & dparams) override {
+        if (!dspark_pending) {
+            return;
+        }
+        ggml_trace_scope trace_finish("dspark.draft_finish", "dspark");
+        common_time_meas tm(t_draft_us, !gen_perf);
+        llama_synchronize(params.ctx_tgt);
+        auto & dp = dparams[0];
+        const int32_t count = dp.result->size();
+        collect_dspark(dp, 0, count);
+        llama_dspark_device_clear_target_tokens(params.ctx_tgt);
+        dspark_pending = false;
+    }
+
     void draft(common_speculative_draft_params_vec & dparams) override {
         ggml_trace_scope trace_scope("dspark.draft", "dspark");
         auto & ctx_dft = params.ctx_dft;
@@ -1537,43 +1604,19 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             }
 
             if (dspark_device) {
-                ggml_trace_scope trace_probs("dspark.readback_and_probs", "dspark");
-                const auto * ids = llama_dspark_device_get_tokens(ctx_dft);
-                const bool use_dense_q = dspark_dense_q && dp.result_q_dense;
-                if (use_dense_q) {
-                    dp.result_q_dense->resize(n_block_tokens, dspark_markov_vocab);
-                }
-                for (int32_t i = 0; i < n_block_tokens; ++i) {
-                    const int32_t idx = beg + i;
-                    const float * probs = llama_dspark_device_get_probs(ctx_dft, idx);
-                    const llama_token id = ids[idx];
-                    if (id < 0 || id >= dspark_markov_vocab || !std::isfinite(probs[id]) || probs[id] <= 0.0f) {
-                        throw std::runtime_error("invalid DSpark device sample");
+                const int32_t count = dp.n_max > 0 ? std::min(dp.n_max, n_block_tokens) : n_block_tokens;
+                if (dspark_async && dp.allow_async && count < (int32_t) llama_n_ubatch(params.ctx_tgt)) {
+                    GGML_ASSERT(!dspark_pending);
+                    // Reserve host bookkeeping; replace IDs before rejection verification.
+                    result.assign(count, mask_token_id);
+                    llama_dspark_device_set_target_tokens(params.ctx_tgt, ctx_dft, dp.pos0, count);
+                    dspark_pending = true;
+                    if (!dspark_async_logged) {
+                        LOG_INF("%s: DSpark asynchronous handoff active: draft=%d target=%d\n", __func__, count, count + 1);
+                        dspark_async_logged = true;
                     }
-                    if (dspark_device_validate) {
-                        double sum = 0.0, prefix = 0.0;
-                        for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
-                            if (!std::isfinite(probs[token]) || probs[token] < 0.0f) {
-                                throw std::runtime_error("DSpark device probability validation failed");
-                            }
-                            sum += probs[token];
-                            if (token < id) { prefix += probs[token]; }
-                        }
-                        const float u = dspark_device_uniforms.at(idx);
-                        if (std::abs(sum - 1.0) > 2e-5 || u < prefix - 2e-6 || u > prefix + probs[id] + 2e-6) {
-                            throw std::runtime_error("DSpark device CDF validation failed");
-                        }
-                    }
-                    result.push_back(id);
-                    if (use_dense_q) {
-                        ggml_trace_scope trace_copy("dspark.copy_dense_q", "copy", 0, "bytes", (size_t) dspark_markov_vocab*sizeof(float));
-                        std::memcpy(dp.result_q_dense->row(i), probs, (size_t) dspark_markov_vocab*sizeof(float));
-                    } else {
-                        auto & q = dp.result_q->emplace_back(dspark_markov_vocab);
-                        for (int32_t token = 0; token < dspark_markov_vocab; ++token) {
-                            q[token] = { token, 0.0f, probs[token] };
-                        }
-                    }
+                } else {
+                    collect_dspark(dp, beg, n_block_tokens);
                 }
                 continue;
             }
@@ -3228,6 +3271,15 @@ void common_speculative_draft(common_speculative * spec) {
         if (dp.drafting) {
             dp.drafting = false;
         }
+    }
+}
+
+void common_speculative_draft_finish(common_speculative * spec) {
+    if (!spec) {
+        return;
+    }
+    for (auto & impl : spec->impls) {
+        impl->draft_finish(spec->dparams);
     }
 }
 

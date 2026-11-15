@@ -644,8 +644,17 @@ struct server_slot {
         prompt.tokens.insert(spec_draft);
     }
 
+    void synchronize_draft_at_end() {
+        const char * async_env = std::getenv("LLAMA_DSPARK_ASYNC");
+        if (ctx_dft && async_env && std::strcmp(async_env, "1") == 0) {
+            llama_synchronize(ctx_dft);
+            stats.update_gen_last();
+        }
+    }
+
     void release() {
         if (is_processing()) {
+            common_speculative_draft_finish(spec);
             GGML_ASSERT(task);
 
             SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d\n", prompt.n_tokens(), truncated);
@@ -3802,6 +3811,8 @@ private:
                             /* .temp     = */ slot.task->params.sampling.temp,
                             /* .seed     = */ slot.task->params.sampling.seed,
                             /* .result_q_dense = */ spec_reject ? &slot.spec_draft_q_dense : nullptr,
+                            /* .allow_async = */ ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART &&
+                                                ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART,
                         };
 
                         drafting.push_back(&slot);
@@ -4659,6 +4670,7 @@ private:
             bool ok = true;
             queue_tasks.yield_to_queue([&]() {
                 ggml_trace_scope trace_process("server.draft_process", "dspark");
+                common_speculative_draft_finish(spec.get());
                 ok = common_speculative_process(spec.get(), batch.view);
             });
 
@@ -4808,6 +4820,7 @@ private:
 
             if (!process_token(result, slot)) {
                 // release slot because of stop condition
+                slot.synchronize_draft_at_end();
                 slot.print_timings();
                 send_final_response(slot);
                 slot.release();
@@ -4961,6 +4974,7 @@ private:
                 slot.stats.n_gen += 1;
 
                 if (!process_token(result, slot)) {
+                    slot.synchronize_draft_at_end();
                     slot.print_timings();
                     send_final_response(slot);
                     slot.release();

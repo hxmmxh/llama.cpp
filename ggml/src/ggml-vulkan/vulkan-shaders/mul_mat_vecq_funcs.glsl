@@ -169,6 +169,14 @@ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
     // 16 quants per call => divide sums by 32/16 = 2
     return mul_q8_1(q_sum, get_dm(ib_a), cache_b_ds, 2);
 }
+#elif defined(DATA_A_Q8_0) && defined(MMVQ_Q8_K_STEP)
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    int32_t sum = 0;
+    [[unroll]] for (uint i = 0; i < K_PER_ITER / 4; ++i) {
+        sum += dotPacked4x8EXT(repack(ib_a, iqs * (K_PER_ITER / 4) + i), cache_b_qs[i]);
+    }
+    return mul_q8_1(sum, float(get_dm(ib_a)), cache_b_ds, 32 / K_PER_ITER);
+}
 #elif defined(DATA_A_QUANT_LEGACY) || defined(DATA_A_MXFP4)
 FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
     int32_t q_sum = 0;
@@ -466,6 +474,29 @@ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
 
     return FLOAT_TYPE(float(cache_b_ds.x) * float(d_scale) * float(q_sum));
 }
+
+#if defined(MMVQ_Q6K_REUSE4)
+struct mmvq_prepared_q6 {
+    i32vec4 qs;
+    float scale;
+};
+
+mmvq_prepared_q6 mmvq_prepare_q6(uint block, uint iqs) {
+    mmvq_prepared_q6 a;
+    a.qs = repack4(block, iqs * 4u);
+    a.scale = get_d_scale(block, iqs * 4u);
+    return a;
+}
+
+FLOAT_TYPE mmvq_dot_q6_prepared(mmvq_prepared_q6 a) {
+    int32_t q_sum = 0;
+    q_sum += dotPacked4x8EXT(a.qs.x, cache_b_qs[0]);
+    q_sum += dotPacked4x8EXT(a.qs.y, cache_b_qs[1]);
+    q_sum += dotPacked4x8EXT(a.qs.z, cache_b_qs[2]);
+    q_sum += dotPacked4x8EXT(a.qs.w, cache_b_qs[3]);
+    return FLOAT_TYPE(float(cache_b_ds.x) * float(a.scale) * float(q_sum));
+}
+#endif
 #endif
 
 #if defined(DATA_A_IQ4_XS)

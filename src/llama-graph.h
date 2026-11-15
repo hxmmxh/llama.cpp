@@ -168,6 +168,7 @@ public:
     float scale_tok = 1.0f;
 
     const int64_t n_embd = 0;
+    const llama_dspark_device_tokens * dspark_tokens = nullptr;
 };
 
 // similar to llm_graph_input_embd but with an additional hidden state input, fed from ubatch.embd_state
@@ -894,6 +895,8 @@ struct llm_graph_params {
 
         if (cparams.dspark_device_sampling != other.cparams.dspark_device_sampling ||
             cparams.dspark_device_features != other.cparams.dspark_device_features ||
+            cparams.dspark_device_tokens != other.cparams.dspark_device_tokens ||
+            cparams.dspark_device_tokens_active != other.cparams.dspark_device_tokens_active ||
             cparams.dspark_device_extract != other.cparams.dspark_device_extract) {
             return false;
         }
