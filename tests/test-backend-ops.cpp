@@ -13083,6 +13083,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_Q6_K,   GGML_GLU_OP_SWIGLU_OAI,   150, 40960, 256, false, 1, 1, false, false, true, false, { 1, 1 }));
     test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_Q8_0,   GGML_GLU_OP_SWIGLU_CLAMP, 150,  6912, 256, false, 1, 1, false, false, true, false, { 2, 3 }));
     test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_IQ4_XS, GGML_GLU_OP_SWIGLU,       150, 40960, 512, false, 1, 1, false, false, true, false, { 1, 1 }));
+    // Q8_0 K16 and output-row grouping, plus unchanged nearby shapes.
+    for (const auto & shape : std::vector<std::array<int64_t, 3>> {
+        {256, 131072, 1}, {2048, 2048, 2}, {2048, 2048, 3},
+        {2048, 6656, 3}, {2048, 131072, 2}, {2048, 131072, 3},
+        {6656, 2048, 3}, {10240, 2048, 2}, {10240, 2048, 4},
+        {2048, 512, 3}, {2048, 131072, 4}, {2048, 2049, 2}, {2048, 2048, 5},
+    }) {
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32,
+            shape[1], shape[2], shape[0], {1, 1}, {1, 1}));
+    }
     test_cases.emplace_back(new test_spark_projection_gemv(4096, 2560, 1, false));
     test_cases.emplace_back(new test_spark_projection_gemv(4096, 2560, 1, true));
     test_cases.emplace_back(new test_spark_projection_gemv(4096, 2560, 2, true));

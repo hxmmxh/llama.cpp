@@ -42,6 +42,24 @@ static constexpr vk_m4_quant_config vk_m4_quant_s17_configs[] = {
     {GGML_TYPE_Q8_0 ,  2048, 131072,    4,   8,    8, VK_M4_Q8_K16}, // lm_head
 };
 
+// Measured Q8_0 projections on Intel Arc 140T. See docs/vulkan-q8-shapes.md.
+struct vk_q8_shape_config {
+    uint32_t k, n, cols, rows;
+};
+
+static constexpr vk_q8_shape_config vk_q8_shape_configs[] = {
+    // K       N       M  rows
+    {  256, 131072,    1,   8}, // Markov, F32 activations
+    { 2048,   2048,    2,   8}, // attn_out
+    { 2048,   2048,    3,   4}, // attn_out
+    { 2048,   6656,    3,   8}, // FFN gate/up
+    { 2048, 131072,    2,   4}, // lm_head
+    { 2048, 131072,    3,   4}, // lm_head
+    { 6656,   2048,    3,   4}, // FFN down
+    {10240,   2048,    2,   4}, // feature projection
+    {10240,   2048,    4,   4}, // feature projection
+};
+
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
 
@@ -2173,6 +2191,41 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             ggml_vk_create_pipeline(device, pipeline, name.c_str(), module_lengths[config.kernel][reduction],
                 module_data[config.kernel][reduction], "main", 5, sizeof(vk_mat_vec_push_constants),
                 {config.rows, 1, 1}, {config.wg, config.rows, 4}, 1, true, true, config.sg);
+        }
+    }
+#endif
+
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    if (device->vendor_id == VK_VENDOR_ID_INTEL && device->integer_dot_product && device->subgroup_arithmetic &&
+        device->subgroup_size_control && device->subgroup_min_size <= 8 && device->subgroup_max_size >= 8 &&
+        device->subgroup_require_full_support && device->properties.limits.maxComputeWorkGroupInvocations >= 8 &&
+        device->properties.limits.maxComputeWorkGroupSize[0] >= 8 && device->max_compute_workgroup_subgroups >= 1 &&
+        getenv("GGML_VK_DISABLE_Q8_SHAPE_OPT") == nullptr) {
+        device->pipeline_q8_shape.resize(std::size(vk_q8_shape_configs));
+        for (size_t i = 0; i < std::size(vk_q8_shape_configs); ++i) {
+            const auto & config = vk_q8_shape_configs[i];
+            if (config.cols == 4 && getenv("GGML_VK_DISABLE_M4_QUANT_LOAD_OPT") != nullptr) {
+                continue;
+            }
+            auto & pipeline = device->pipeline_q8_shape[i];
+            bool shared = false;
+            for (size_t j = 0; j < i; ++j) {
+                const auto & previous = vk_q8_shape_configs[j];
+                if (config.cols == previous.cols && config.rows == previous.rows) {
+                    if (!pipeline) { pipeline = device->pipeline_q8_shape[j]; }
+                    shared = true;
+                    break;
+                }
+            }
+            if (shared) {
+                continue;
+            }
+            const bool f32 = config.cols == 1;
+            const size_t length = f32 ? mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem_len : mul_mat_vec_q8_0_q8_1_f32_m4_k16_len;
+            const void * bytes = f32 ? mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem_data : mul_mat_vec_q8_0_q8_1_f32_m4_k16_data;
+            const std::string name = std::string("mul_mat_vec_q8_0_shape_m") + std::to_string(config.cols) + "_rows" + std::to_string(config.rows);
+            ggml_vk_create_pipeline(device, pipeline, name.c_str(), length, bytes, "main", 5,
+                sizeof(vk_mat_vec_push_constants), {config.rows, 1, 1}, {8, config.rows, config.cols}, 1, true, true, 8);
         }
     }
 #endif
@@ -5724,6 +5777,15 @@ vk_pipeline ggml_vk_get_to_fp16(ggml_backend_vk_context * ctx, ggml_type type) {
 
 static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context * ctx, ggml_type a_type, ggml_type b_type, uint32_t num_cols, uint32_t m, uint32_t k) {
     VK_LOG_DEBUG("ggml_vk_get_dequantize_mul_mat_vec()");
+    if (a_type == GGML_TYPE_Q8_0 && !ctx->device->pipeline_q8_shape.empty() &&
+        ((num_cols == 1 && b_type == GGML_TYPE_F32) || (num_cols >= 2 && b_type == GGML_TYPE_Q8_1))) {
+        for (size_t i = 0; i < std::size(vk_q8_shape_configs); ++i) {
+            const auto & config = vk_q8_shape_configs[i];
+            if (k == config.k && m == config.n && num_cols == config.cols && ctx->device->pipeline_q8_shape[i]) {
+                return ctx->device->pipeline_q8_shape[i];
+            }
+        }
+    }
     const bool fc1 = k == 2560 && m == 10240;
     const bool fc2 = k == 10240 && m == 2560;
     if (b_type == GGML_TYPE_Q8_1 && num_cols == 4 && (fc1 || fc2)) {

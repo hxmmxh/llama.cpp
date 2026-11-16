@@ -1,0 +1,263 @@
+{
+  "passed": true,
+  "date": "2026-11-16",
+  "base_commit": "0e84cd2daffb1f9438469f2d7e13d541f2eedb28",
+  "target_branch": "vulkan_opt",
+  "scope": "M3 head K16 and primary Q8_0 projection configurations; original weight layout",
+  "code_files": [
+    {
+      "path": "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+      "sha256": "991dc0e79332ec96f624784917fbc703da5ec2e6947b1197bc81b5eae1129384"
+    },
+    {
+      "path": "ggml/src/ggml-vulkan/ggml-vulkan-types.h",
+      "sha256": "0ad33c794171c20ee91dea7d3c6f2c3b542ae9dbb039a9b12e3463744ddc2ff9"
+    },
+    {
+      "path": "tests/test-backend-ops.cpp",
+      "sha256": "1d731e148b740a1b1db7cfbc7128ea97bcc4cddf9dce0bfee373609e628e48f1"
+    }
+  ],
+  "local_dispatch": {
+    "passed": true,
+    "table_matches_gpu_tested_primary_plus_m3": true,
+    "configs": 9,
+    "code_sha256": "4e44f499a621426a75d4723928c07eb84db91b1cd0b8dc31c23ba330a8720829",
+    "result": "9 configs, activation/type/shape gates, missing pipeline fallback, 11 capability/flag gates, lazy alias and M4 disable passed"
+  },
+  "shader_preprocess": [
+    {
+      "kernel": "k16",
+      "token_stream_identical": true,
+      "production_sha256": "1ab5ff7545250e270698464d2e74b6d7f56f6367feede5acbae0e45f230765ea",
+      "tested_sha256": "1ab5ff7545250e270698464d2e74b6d7f56f6367feede5acbae0e45f230765ea"
+    },
+    {
+      "kernel": "f32",
+      "token_stream_identical": true,
+      "production_sha256": "f625f6369e05188570e2076bd053e0eb68dbb3f2999fd6c8013d4656823211e2",
+      "tested_sha256": "f625f6369e05188570e2076bd053e0eb68dbb3f2999fd6c8013d4656823211e2"
+    }
+  ],
+  "backend_comparison": {
+    "enabled": {
+      "passed": true,
+      "total": 15,
+      "expected_shapes_covered": 13,
+      "shapes": [
+        [
+          256,
+          131072,
+          1
+        ],
+        [
+          2048,
+          512,
+          3
+        ],
+        [
+          2048,
+          2048,
+          1
+        ],
+        [
+          2048,
+          2048,
+          2
+        ],
+        [
+          2048,
+          2048,
+          3
+        ],
+        [
+          2048,
+          2048,
+          4
+        ],
+        [
+          2048,
+          2048,
+          5
+        ],
+        [
+          2048,
+          2049,
+          2
+        ],
+        [
+          2048,
+          6656,
+          3
+        ],
+        [
+          2048,
+          131072,
+          2
+        ],
+        [
+          2048,
+          131072,
+          3
+        ],
+        [
+          2048,
+          131072,
+          4
+        ],
+        [
+          6656,
+          2048,
+          3
+        ],
+        [
+          10240,
+          2048,
+          2
+        ],
+        [
+          10240,
+          2048,
+          4
+        ]
+      ]
+    },
+    "disabled": {
+      "passed": true,
+      "total": 15,
+      "expected_shapes_covered": 13,
+      "shapes": [
+        [
+          256,
+          131072,
+          1
+        ],
+        [
+          2048,
+          512,
+          3
+        ],
+        [
+          2048,
+          2048,
+          1
+        ],
+        [
+          2048,
+          2048,
+          2
+        ],
+        [
+          2048,
+          2048,
+          3
+        ],
+        [
+          2048,
+          2048,
+          4
+        ],
+        [
+          2048,
+          2048,
+          5
+        ],
+        [
+          2048,
+          2049,
+          2
+        ],
+        [
+          2048,
+          6656,
+          3
+        ],
+        [
+          2048,
+          131072,
+          2
+        ],
+        [
+          2048,
+          131072,
+          3
+        ],
+        [
+          2048,
+          131072,
+          4
+        ],
+        [
+          6656,
+          2048,
+          3
+        ],
+        [
+          10240,
+          2048,
+          2
+        ],
+        [
+          10240,
+          2048,
+          4
+        ]
+      ]
+    }
+  },
+  "default_output": {
+    "passed": true,
+    "seed": 1,
+    "output_tokens": 512,
+    "accepted": 298,
+    "proposed": 639,
+    "default_selection": true
+  },
+  "frozen_source_files": 3968,
+  "source_zip_sha256": "207b50b3182f25b241569c2b96212a39e55761a8248ff0dc6008f060c9240d6f",
+  "runtime_files": [
+    {
+      "path": "C:\\Users\\yaozhang21\\cpu-infer\\b\\qi20261116141624\\bin\\llama-server.exe",
+      "sha256": "058204a81114a4fc926182113f7c49f493685b907266854a87f333c0fcc73d3b",
+      "name": "llama-server.exe",
+      "bytes": 52507136
+    },
+    {
+      "path": "C:\\Users\\yaozhang21\\cpu-infer\\b\\qi20261116141624\\bin\\test-backend-ops.exe",
+      "sha256": "b0093764849de3871576ac80ef24a3623717ccdfbdddddc8eb90c33035cef16f",
+      "name": "test-backend-ops.exe",
+      "bytes": 45083648
+    }
+  ],
+  "models": [
+    {
+      "path": "C:\\Users\\yaozhang21\\cpu-infer\\models\\Spark-X2.6-1.7B-Q4_K_M.gguf",
+      "sha256": "7abd9859c10924be3c583945456fa9b25d0569484876105a7b7376f7938fffb7",
+      "bytes": 1768720512
+    },
+    {
+      "path": "C:\\Users\\yaozhang21\\cpu-infer\\runs\\20261111-115611-vulkan-benchmark-4b-17b\\models\\Spark-X2.6-1.7B-DSpark-Q8_0-backbone.gguf",
+      "sha256": "cb863aec68d8f838b7bdbea66226e23476137b51f9bebebe491c3ac43ecb3c17",
+      "bytes": 403682048
+    }
+  ],
+  "gpu": [
+    {
+      "Name": "OrayIddDriver Device",
+      "DriverVersion": "16.54.44.444",
+      "Status": "OK"
+    },
+    {
+      "Name": "Intel(R) Arc(TM) 140T GPU (16GB)",
+      "DriverVersion": "32.0.101.6313",
+      "Status": "OK"
+    }
+  ],
+  "resources_released": true,
+  "experiment": "../../experiments/windows-cpu/windows_core_ultra_7_255h/20261116-141624-vulkan-q8-shape-integration",
+  "prior_performance_report": "../../../reports/igpu\u4e2d\u8017\u65f6\u5206\u5e03\u5206\u6790/20261116-111820-vulkan-q8-primary-seeds/README.md",
+  "notes": [
+    "No new throughput claim: integration generation is a correctness check.",
+    "First backend run passed all 15 numerical cases but lacked an exit code; preserved as a harness diagnostic. A new native run captured the process handle and verified exit code 0 in both modes."
+  ]
+}
