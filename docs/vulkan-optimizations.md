@@ -9,7 +9,13 @@ This inventory describes the `vulkan_opt` implementation, including the integrat
 - [Q8_0 K16](vulkan-q8-m4-k16.md) processes 16 K elements per lane iteration and four output channels per workgroup for selected 1.7B shapes. It changes floating-point accumulation order; its numerical contract is tolerance based rather than bitwise equivalence to the old kernel.
 - [1.7B shape configurations](vulkan-s17-m4-configs.md) select the measured loader, reuse, output-channel count, subgroup and workgroup for six projection shapes in Q4_K/Q6_K/Q8_0. BF16 keeps existing choices. Pipeline creation checks device limits, shares identical configurations and supports lazy compilation.
 
-These paths are selected automatically for eligible Intel integer-dot devices and M=4. `GGML_VK_DISABLE_M4_QUANT_LOAD_OPT=1` disables the fast paths. Other token counts and unsupported devices retain their existing paths. Maximum draft length 3 permits a four-position target verification forward; the actual executed shapes still determine dispatch.
+These original M4 profiles are selected automatically for eligible Intel integer-dot devices. `GGML_VK_DISABLE_M4_QUANT_LOAD_OPT=1` disables the fast paths. Within this legacy table, other token counts and unsupported devices retain their existing paths. Maximum draft length 3 permits a four-position target verification forward; the actual executed shapes still determine dispatch.
+
+## M1..M8 coverage
+
+[Small-token configurations](vulkan-small-m.md) extend the measured loaders, reuse and geometry choices to all ten 1.7B main/draft linear shapes and Q4_K/Q6_K/Q8_0/BF16 at M1..M8. Every tuple is tested; only stable improvements are selected. The new table precedes the retained M4, D1 and Q8-shape tables. Default activation precision is preserved; measured M1 Q8_1 paths are available through `GGML_VK_ENABLE_M1_Q8=1`.
+
+RMSNorm/scale/residual fusion, GELU-times-up, RoPE and KV writes already accept multiple rows. Existing GQA, scalar attention, and split-K selection also cover small M; the regression matrix now exercises F16/Q8_0 KV attention and normalization throughout M1..M8. Their algorithms and KV formats are unchanged by the projection integration.
 
 ## DSpark buffers and scheduling
 

@@ -2641,11 +2641,11 @@ struct test_spark_projection_gemv : public test_case {
 
 
 struct test_spark_decode_norm : public test_case {
-    const int64_t n_tokens;
+    const int64_t n_tokens, hidden;
 
-    explicit test_spark_decode_norm(int64_t n_tokens) : n_tokens(n_tokens) {}
+    explicit test_spark_decode_norm(int64_t n_tokens, int64_t hidden = 2560) : n_tokens(n_tokens), hidden(hidden) {}
 
-    std::string vars() override { return VAR_TO_STR(n_tokens); }
+    std::string vars() override { return VARS_TO_STR2(n_tokens, hidden); }
 
     std::string op_desc(ggml_tensor * t) override {
         GGML_UNUSED(t);
@@ -2655,8 +2655,8 @@ struct test_spark_decode_norm : public test_case {
     bool run_whole_graph() override { return true; }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * src = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2560, n_tokens);
-        ggml_tensor * weight = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2560);
+        ggml_tensor * src = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
+        ggml_tensor * weight = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hidden);
         return ggml_mul(ctx, ggml_rms_norm(ctx, src, 1e-6f), weight);
     }
 };
@@ -6019,6 +6019,33 @@ struct test_mul_mat_w4a4 : public test_mul_mat {
     }
 };
 
+struct test_small_m_projection : public test_mul_mat {
+    test_small_m_projection(ggml_type type, int64_t k, int64_t rows, int64_t tokens, ggml_type activation = GGML_TYPE_F32)
+        : test_mul_mat(type, activation, rows, tokens, k, {1, 1}, {1, 1}) {}
+
+    std::string op_desc(ggml_tensor *) override { return "SMALL_M_PROJECTION"; }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_mul_mat::initialize_tensors(ctx);
+        if (m != 1) {
+            return;
+        }
+        // Avoid near-zero scalar references when backends quantize activations differently.
+        ggml_tensor * a = ggml_get_tensor(ctx, "a");
+        ggml_tensor * b = ggml_get_tensor(ctx, "b");
+        GGML_ASSERT(a && b && b->type == GGML_TYPE_F32);
+        const auto weights = tensor_to_float(a);
+        std::vector<float> values(ggml_nelements(b));
+        for (int64_t col = 0; col < n; ++col) {
+            const float sign = col % 2 == 0 ? 1.0f : -1.0f;
+            for (int64_t i = 0; i < k; ++i) {
+                values[col*k+i] = sign * weights[i] * float(16 + (i + col) % 17) / 32.0f;
+            }
+        }
+        ggml_backend_tensor_set(b, values.data(), 0, values.size()*sizeof(float));
+    }
+};
+
 static void init_mul_mat_id_ids(ggml_context * ctx, int n_mats, bool skip = false) {
 
     std::random_device rd;
@@ -9196,6 +9223,14 @@ struct test_flash_attn_ext_q8_mask : public test_flash_attn_ext {
         }
         ggml_backend_tensor_set(ggml_get_tensor(ctx, "m"), values.data(), 0, values.size() * sizeof(ggml_fp16_t));
     }
+};
+
+struct test_small_m_attention : public test_flash_attn_ext {
+    test_small_m_attention(int64_t tokens, int64_t history, ggml_type cache_type)
+        : test_flash_attn_ext(256, 256, 2, {4, 1}, history, tokens, true, false, 0, 0,
+                              GGML_PREC_F32, cache_type, cache_type) {}
+
+    std::string op_desc(ggml_tensor *) override { return "SMALL_M_ATTENTION"; }
 };
 
 // GGML_OP_CROSS_ENTROPY_LOSS
@@ -13093,6 +13128,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32,
             shape[1], shape[2], shape[0], {1, 1}, {1, 1}));
     }
+    // Small-token projection coverage, including the unchanged M9 boundary.
+    for (ggml_type type : {GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, GGML_TYPE_BF16}) {
+        for (int64_t tokens = 1; tokens <= 9; ++tokens) {
+            for (const auto & shape : std::vector<std::array<int64_t, 2>> {
+                {2048, 3072}, {2048, 8}, {2048, 2048}, {2048, 6656}, {6656, 2048},
+                {2048, 131072}, {2048, 512}, {10240, 2048}, {256, 131072}, {2304, 1},
+            }) {
+                test_cases.emplace_back(new test_small_m_projection(type, shape[0], shape[1], tokens));
+            }
+        }
+        for (ggml_type activation : {GGML_TYPE_F16, GGML_TYPE_BF16}) {
+            for (int64_t tokens : {1, 5}) {
+                test_cases.emplace_back(new test_small_m_projection(type, 2048, 512, tokens, activation));
+            }
+        }
+    }
     test_cases.emplace_back(new test_spark_projection_gemv(4096, 2560, 1, false));
     test_cases.emplace_back(new test_spark_projection_gemv(4096, 2560, 1, true));
     test_cases.emplace_back(new test_spark_projection_gemv(4096, 2560, 2, true));
@@ -13108,6 +13159,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_spark_projection_gemv(2048, 131072, 1, true));
     test_cases.emplace_back(new test_spark_decode_norm(1));
     test_cases.emplace_back(new test_spark_decode_norm(2));
+    for (int64_t tokens = 1; tokens <= 8; ++tokens) {
+        test_cases.emplace_back(new test_spark_decode_norm(tokens, 2048));
+        for (int64_t history : {512, 4096}) {
+            for (ggml_type cache_type : {GGML_TYPE_F16, GGML_TYPE_Q8_0}) {
+                test_cases.emplace_back(new test_small_m_attention(tokens, history, cache_type));
+            }
+        }
+    }
 
     test_cases.emplace_back(new test_gated_attention_output_fusion());
     test_cases.emplace_back(new test_gated_attention_output_fusion(true));

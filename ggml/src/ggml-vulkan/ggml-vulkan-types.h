@@ -795,6 +795,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_matmul_split_k_reduce;
     vk_pipeline pipeline_quantize_q8_1_x4;
     vk_pipeline pipeline_m4_quant[5];
+    std::vector<vk_pipeline> pipeline_small_m;
+    std::vector<vk_pipeline> pipeline_d1_quant;
     std::vector<vk_pipeline> pipeline_m4_quant_s17;
     std::vector<vk_pipeline> pipeline_q8_shape;
 

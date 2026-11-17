@@ -42,6 +42,24 @@ static constexpr vk_m4_quant_config vk_m4_quant_s17_configs[] = {
     {GGML_TYPE_Q8_0 ,  2048, 131072,    4,   8,    8, VK_M4_Q8_K16}, // lm_head
 };
 
+
+// Measured M1/M2 profiles for Spark 1.7B on Intel Arc 140T.
+// See docs/vulkan-d1-m1-m2.md.
+struct vk_d1_quant_config {
+    ggml_type type;
+    uint32_t k, n, cols, rows, sg;
+};
+
+static constexpr vk_d1_quant_config vk_d1_quant_configs[] = {
+    {GGML_TYPE_Q8_0, 2048, 131072, 2, 4, 8},
+    {GGML_TYPE_Q6_K, 6656, 2048, 2, 4, 8},
+    {GGML_TYPE_Q4_K, 2048, 6656, 2, 2, 8},
+    {GGML_TYPE_Q4_K, 2048, 3072, 2, 2, 8},
+    {GGML_TYPE_Q4_K, 6656, 2048, 2, 2, 8},
+    {GGML_TYPE_Q8_0, 256, 131072, 1, 8, 16},
+    {GGML_TYPE_Q8_0, 2048, 131072, 1, 4, 16},
+};
+
 // Measured Q8_0 projections on Intel Arc 140T. See docs/vulkan-q8-shapes.md.
 struct vk_q8_shape_config {
     uint32_t k, n, cols, rows;
@@ -59,6 +77,220 @@ static constexpr vk_q8_shape_config vk_q8_shape_configs[] = {
     {10240,   2048,    2,   4}, // feature projection
     {10240,   2048,    4,   4}, // feature projection
 };
+
+// Measured small-token projection profiles. See docs/vulkan-small-m.md.
+enum vk_small_m_kernel {
+    VK_SMALL_M_BF16_F32,
+    VK_SMALL_M_Q4_F32,
+    VK_SMALL_M_Q4_Q8,
+    VK_SMALL_M_Q4_VEC128,
+    VK_SMALL_M_Q6_F32,
+    VK_SMALL_M_Q6_Q8,
+    VK_SMALL_M_Q6_BRANCHLESS,
+    VK_SMALL_M_Q6_BRANCHLESS_REUSE,
+    VK_SMALL_M_Q6_FIVE_REUSE,
+    VK_SMALL_M_Q8_F32,
+    VK_SMALL_M_Q8_Q8,
+    VK_SMALL_M_Q8_K16,
+};
+
+struct vk_small_m_config {
+    ggml_type type, activation;
+    uint32_t k, n, cols, rows, sg, wg;
+    vk_small_m_kernel kernel;
+};
+
+static constexpr vk_small_m_config vk_small_m_configs[] = {
+    {GGML_TYPE_Q4_K, GGML_TYPE_F32, 256, 131072, 1, 4, 16, 16, VK_SMALL_M_Q4_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_F32, 2048, 2048, 1, 2, 16, 16, VK_SMALL_M_Q4_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_F32, 2048, 3072, 1, 4, 16, 16, VK_SMALL_M_Q4_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_F32, 2048, 6656, 1, 2, 16, 16, VK_SMALL_M_Q4_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_F32, 6656, 2048, 1, 4, 16, 16, VK_SMALL_M_Q4_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_F32, 10240, 2048, 1, 2, 16, 16, VK_SMALL_M_Q4_F32},
+    {GGML_TYPE_Q6_K, GGML_TYPE_F32, 256, 131072, 1, 4, 16, 16, VK_SMALL_M_Q6_F32},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 256, 131072, 1, 4, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_F32, 2048, 8, 1, 1, 16, 64, VK_SMALL_M_Q6_F32},
+    {GGML_TYPE_Q6_K, GGML_TYPE_F32, 2048, 6656, 1, 2, 16, 64, VK_SMALL_M_Q6_F32},
+    {GGML_TYPE_Q6_K, GGML_TYPE_F32, 2048, 131072, 1, 4, 16, 64, VK_SMALL_M_Q6_F32},
+    {GGML_TYPE_Q6_K, GGML_TYPE_F32, 6656, 2048, 1, 1, 16, 64, VK_SMALL_M_Q6_F32},
+    {GGML_TYPE_Q6_K, GGML_TYPE_F32, 10240, 2048, 1, 1, 16, 64, VK_SMALL_M_Q6_F32},
+    {GGML_TYPE_Q8_0, GGML_TYPE_F32, 2048, 8, 1, 1, 16, 64, VK_SMALL_M_Q8_F32},
+    {GGML_TYPE_Q8_0, GGML_TYPE_F32, 2048, 2048, 1, 2, 32, 32, VK_SMALL_M_Q8_F32},
+    {GGML_TYPE_Q8_0, GGML_TYPE_F32, 2048, 3072, 1, 2, 32, 32, VK_SMALL_M_Q8_F32},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 6656, 1, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 131072, 1, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_F32, 6656, 2048, 1, 2, 32, 32, VK_SMALL_M_Q8_F32},
+    {GGML_TYPE_Q8_0, GGML_TYPE_F32, 10240, 2048, 1, 2, 32, 32, VK_SMALL_M_Q8_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 2, 4, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 2, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 2, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 8, 2, 1, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 512, 2, 2, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 2048, 2, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 3072, 2, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 131072, 2, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 6656, 2048, 2, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 10240, 2048, 2, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 256, 131072, 2, 4, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 2048, 2, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 3072, 2, 2, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 6656, 2, 2, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 131072, 2, 2, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 10240, 2048, 2, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 256, 131072, 2, 8, 8, 8, VK_SMALL_M_Q8_Q8},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 8, 2, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 512, 2, 2, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 2048, 2, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 3072, 2, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 6656, 2, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 2, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 2, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 2, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 3, 4, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 3, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 3, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 2048, 3, 4, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 3072, 3, 4, 8, 8, VK_SMALL_M_Q4_Q8},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 6656, 3, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 131072, 3, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 6656, 2048, 3, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 10240, 2048, 3, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 256, 131072, 3, 4, 8, 8, VK_SMALL_M_Q6_BRANCHLESS},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 2048, 3, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 3072, 3, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 6656, 3, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 131072, 3, 4, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 6656, 2048, 3, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 10240, 2048, 3, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 256, 131072, 3, 8, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 3072, 3, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 6656, 3, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 3, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 3, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 4, 4, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 2048, 4, 2, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 4, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 4, 4, 8, 8, VK_SMALL_M_Q4_Q8},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 512, 4, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 10240, 2048, 4, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 256, 131072, 4, 4, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 10240, 2048, 4, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 256, 131072, 4, 8, 8, 8, VK_SMALL_M_Q8_Q8},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 4, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 5, 4, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 5, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 512, 5, 2, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 2048, 5, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 3072, 5, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 6656, 5, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 131072, 5, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 6656, 2048, 5, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 10240, 2048, 5, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 256, 131072, 5, 4, 8, 8, VK_SMALL_M_Q6_BRANCHLESS},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 512, 5, 2, 16, 32, VK_SMALL_M_Q6_BRANCHLESS_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 2048, 5, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 3072, 5, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 6656, 5, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 131072, 5, 4, 8, 8, VK_SMALL_M_Q6_BRANCHLESS},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 6656, 2048, 5, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 10240, 2048, 5, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 256, 131072, 5, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 2048, 5, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 3072, 5, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 6656, 5, 8, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 131072, 5, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 5, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 5, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 5, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 6, 4, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 8, 6, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 2048, 6, 2, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 6, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 6, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 2048, 6, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 3072, 6, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 6656, 6, 2, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 131072, 6, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 6656, 2048, 6, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 10240, 2048, 6, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 256, 131072, 6, 4, 8, 8, VK_SMALL_M_Q6_BRANCHLESS},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 2048, 6, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 3072, 6, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 6656, 6, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 131072, 6, 4, 8, 8, VK_SMALL_M_Q6_BRANCHLESS},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 6656, 2048, 6, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 10240, 2048, 6, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 256, 131072, 6, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 2048, 6, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 3072, 6, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 6656, 6, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 131072, 6, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 6, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 6, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 6, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 7, 4, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 7, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 7, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 512, 7, 1, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 2048, 7, 2, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 3072, 7, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 6656, 7, 2, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 131072, 7, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2304, 1, 7, 1, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 6656, 2048, 7, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 10240, 2048, 7, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 256, 131072, 7, 4, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 512, 7, 2, 16, 32, VK_SMALL_M_Q6_BRANCHLESS_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 2048, 7, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 3072, 7, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 6656, 7, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 131072, 7, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 6656, 2048, 7, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 10240, 2048, 7, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 256, 131072, 7, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 8, 7, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 2048, 7, 4, 8, 8, VK_SMALL_M_Q8_Q8},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 3072, 7, 4, 8, 8, VK_SMALL_M_Q8_Q8},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 6656, 7, 4, 8, 8, VK_SMALL_M_Q8_Q8},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 131072, 7, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 7, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 7, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 7, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 8, 4, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 8, 8, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 512, 8, 2, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 2048, 8, 2, 16, 16, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 3072, 8, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 131072, 8, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 8, 1, 16, 64, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_BF16, GGML_TYPE_F32, 10240, 2048, 8, 2, 16, 128, VK_SMALL_M_BF16_F32},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 8, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 512, 8, 1, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 2048, 8, 2, 16, 16, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 3072, 8, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 6656, 8, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 131072, 8, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 6656, 2048, 8, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 10240, 2048, 8, 4, 8, 32, VK_SMALL_M_Q4_VEC128},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 256, 131072, 8, 4, 8, 8, VK_SMALL_M_Q6_Q8},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 512, 8, 2, 16, 32, VK_SMALL_M_Q6_BRANCHLESS_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 2048, 8, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 3072, 8, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 6656, 8, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 2048, 131072, 8, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 6656, 2048, 8, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 10240, 2048, 8, 4, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 256, 131072, 8, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 2048, 8, 4, 8, 8, VK_SMALL_M_Q8_Q8},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 3072, 8, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 6656, 8, 4, 8, 8, VK_SMALL_M_Q8_Q8},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 131072, 8, 4, 8, 8, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 8, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 8, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 8, 4, 8, 32, VK_SMALL_M_Q8_K16},
+};
+
+static constexpr size_t vk_small_m_offsets[] = {0, 20, 45, 66, 76, 101, 127, 155, 187};
 
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
@@ -2197,6 +2429,40 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
     if (device->vendor_id == VK_VENDOR_ID_INTEL && device->integer_dot_product && device->subgroup_arithmetic &&
+        device->subgroup_size_control && device->subgroup_require_full_support && getenv("GGML_VK_DISABLE_D1_QUANT_OPT") == nullptr) {
+        device->pipeline_d1_quant.resize(std::size(vk_d1_quant_configs));
+        for (size_t i = 0; i < std::size(vk_d1_quant_configs); ++i) {
+            const auto & config = vk_d1_quant_configs[i];
+            if (config.sg < device->subgroup_min_size || config.sg > device->subgroup_max_size ||
+                config.sg > device->properties.limits.maxComputeWorkGroupInvocations ||
+                config.sg > device->properties.limits.maxComputeWorkGroupSize[0] || device->max_compute_workgroup_subgroups < 1) {
+                continue;
+            }
+            size_t length;
+            const void * bytes;
+            if (config.cols == 1) {
+                length = mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem_len;
+                bytes = mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem_data;
+            } else if (config.type == GGML_TYPE_Q4_K) {
+                length = mul_mat_vec_q4_k_q8_1_f32_m4_vec128_len;
+                bytes = mul_mat_vec_q4_k_q8_1_f32_m4_vec128_data;
+            } else if (config.type == GGML_TYPE_Q6_K) {
+                length = mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_len;
+                bytes = mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_data;
+            } else {
+                length = mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_len;
+                bytes = mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_data;
+            }
+            const std::string name = std::string("mul_mat_vec_d1_") + ggml_type_name(config.type) + "_k" + std::to_string(config.k) +
+                "_n" + std::to_string(config.n) + "_m" + std::to_string(config.cols);
+            ggml_vk_create_pipeline(device, device->pipeline_d1_quant[i], name.c_str(), length, bytes, "main", 5,
+                sizeof(vk_mat_vec_push_constants), {config.rows, 1, 1}, {config.sg, config.rows, config.cols}, 1, true, true, config.sg);
+        }
+    }
+#endif
+
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    if (device->vendor_id == VK_VENDOR_ID_INTEL && device->integer_dot_product && device->subgroup_arithmetic &&
         device->subgroup_size_control && device->subgroup_min_size <= 8 && device->subgroup_max_size >= 8 &&
         device->subgroup_require_full_support && device->properties.limits.maxComputeWorkGroupInvocations >= 8 &&
         device->properties.limits.maxComputeWorkGroupSize[0] >= 8 && device->max_compute_workgroup_subgroups >= 1 &&
@@ -2226,6 +2492,91 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             const std::string name = std::string("mul_mat_vec_q8_0_shape_m") + std::to_string(config.cols) + "_rows" + std::to_string(config.rows);
             ggml_vk_create_pipeline(device, pipeline, name.c_str(), length, bytes, "main", 5,
                 sizeof(vk_mat_vec_push_constants), {config.rows, 1, 1}, {8, config.rows, config.cols}, 1, true, true, 8);
+        }
+    }
+#endif
+
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    if (device->vendor_id == VK_VENDOR_ID_INTEL && device->integer_dot_product && device->subgroup_arithmetic &&
+        device->subgroup_size_control && device->subgroup_require_full_support && getenv("GGML_VK_DISABLE_SMALL_M_OPT") == nullptr) {
+        const size_t lengths[][2] = {
+            {mul_mat_vec_bf16_f32_f32_subgroup_no_shmem_len, mul_mat_vec_bf16_f32_f32_subgroup_len},
+            {mul_mat_vec_q4_k_f32_f32_subgroup_no_shmem_len, 0},
+            {mul_mat_vec_q4_k_q8_1_f32_subgroup_no_shmem_len, 0},
+            {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_len, mul_mat_vec_q4_k_q8_1_f32_m4_vec128_subgroup_len},
+            {mul_mat_vec_q6_k_f32_f32_subgroup_no_shmem_len, mul_mat_vec_q6_k_f32_f32_subgroup_len},
+            {mul_mat_vec_q6_k_q8_1_f32_subgroup_no_shmem_len, 0},
+            {mul_mat_vec_q6_k_q8_1_f32_m4_branchless_len, 0},
+            {0, mul_mat_vec_q6_k_q8_1_f32_m4_branchless_reuse_subgroup_len},
+            {mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_len, 0},
+            {mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem_len, mul_mat_vec_q8_0_f32_f32_subgroup_len},
+            {mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_len, 0},
+            {mul_mat_vec_q8_0_q8_1_f32_m4_k16_len, mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup_len},
+        };
+        const void * bytes[][2] = {
+            {mul_mat_vec_bf16_f32_f32_subgroup_no_shmem_data, mul_mat_vec_bf16_f32_f32_subgroup_data},
+            {mul_mat_vec_q4_k_f32_f32_subgroup_no_shmem_data, nullptr},
+            {mul_mat_vec_q4_k_q8_1_f32_subgroup_no_shmem_data, nullptr},
+            {mul_mat_vec_q4_k_q8_1_f32_m4_vec128_data, mul_mat_vec_q4_k_q8_1_f32_m4_vec128_subgroup_data},
+            {mul_mat_vec_q6_k_f32_f32_subgroup_no_shmem_data, mul_mat_vec_q6_k_f32_f32_subgroup_data},
+            {mul_mat_vec_q6_k_q8_1_f32_subgroup_no_shmem_data, nullptr},
+            {mul_mat_vec_q6_k_q8_1_f32_m4_branchless_data, nullptr},
+            {nullptr, mul_mat_vec_q6_k_q8_1_f32_m4_branchless_reuse_subgroup_data},
+            {mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse_data, nullptr},
+            {mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem_data, mul_mat_vec_q8_0_f32_f32_subgroup_data},
+            {mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_data, nullptr},
+            {mul_mat_vec_q8_0_q8_1_f32_m4_k16_data, mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup_data},
+        };
+        const char * names[][2] = {
+            {"mul_mat_vec_bf16_f32_f32_subgroup_no_shmem", "mul_mat_vec_bf16_f32_f32_subgroup"},
+            {"mul_mat_vec_q4_k_f32_f32_subgroup_no_shmem", nullptr},
+            {"mul_mat_vec_q4_k_q8_1_f32_subgroup_no_shmem", nullptr},
+            {"mul_mat_vec_q4_k_q8_1_f32_m4_vec128", "mul_mat_vec_q4_k_q8_1_f32_m4_vec128_subgroup"},
+            {"mul_mat_vec_q6_k_f32_f32_subgroup_no_shmem", "mul_mat_vec_q6_k_f32_f32_subgroup"},
+            {"mul_mat_vec_q6_k_q8_1_f32_subgroup_no_shmem", nullptr},
+            {"mul_mat_vec_q6_k_q8_1_f32_m4_branchless", nullptr},
+            {nullptr, "mul_mat_vec_q6_k_q8_1_f32_m4_branchless_reuse_subgroup"},
+            {"mul_mat_vec_q6_k_q8_1_f32_m4_five_reuse", nullptr},
+            {"mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem", "mul_mat_vec_q8_0_f32_f32_subgroup"},
+            {"mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem", nullptr},
+            {"mul_mat_vec_q8_0_q8_1_f32_m4_k16", "mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup"},
+        };
+        device->pipeline_small_m.resize(std::size(vk_small_m_configs));
+        for (size_t i = 0; i < std::size(vk_small_m_configs); ++i) {
+            const auto & config = vk_small_m_configs[i];
+            const bool m1_q8 = config.cols == 1 && config.activation == GGML_TYPE_Q8_1;
+            if ((config.cols == 8 && getenv("GGML_VK_DISABLE_M8_OPT") != nullptr) ||
+                (m1_q8 && getenv("GGML_VK_ENABLE_M1_Q8") == nullptr) ||
+                (config.cols == 4 && getenv("GGML_VK_DISABLE_M4_QUANT_LOAD_OPT") != nullptr) ||
+                (config.type == GGML_TYPE_Q8_0 && getenv("GGML_VK_DISABLE_Q8_SHAPE_OPT") != nullptr) ||
+                (config.cols <= 2 && getenv("GGML_VK_DISABLE_D1_QUANT_OPT") != nullptr)) {
+                continue;
+            }
+            if (config.sg < device->subgroup_min_size || config.sg > device->subgroup_max_size ||
+                config.wg > device->properties.limits.maxComputeWorkGroupInvocations ||
+                config.wg > device->properties.limits.maxComputeWorkGroupSize[0] ||
+                config.wg / config.sg > device->max_compute_workgroup_subgroups ||
+                (config.sg != config.wg && uint64_t(config.cols) * config.rows * config.wg * sizeof(float) > device->properties.limits.maxComputeSharedMemorySize)) {
+                continue;
+            }
+            auto & pipeline = device->pipeline_small_m[i];
+            bool shared = false;
+            for (size_t j = 0; j < i; ++j) {
+                const auto & previous = vk_small_m_configs[j];
+                if (config.kernel == previous.kernel && config.cols == previous.cols && config.rows == previous.rows &&
+                    config.sg == previous.sg && config.wg == previous.wg && device->pipeline_small_m[j]) {
+                    if (!pipeline) { pipeline = device->pipeline_small_m[j]; }
+                    shared = true;
+                    break;
+                }
+            }
+            if (shared) { continue; }
+            const uint32_t reduction = config.sg == config.wg ? 0 : 1;
+            GGML_ASSERT(bytes[config.kernel][reduction] != nullptr);
+            const std::string name = std::string(names[config.kernel][reduction]) + "_small_m" + std::to_string(config.cols) +
+                "_rows" + std::to_string(config.rows) + "_sg" + std::to_string(config.sg) + "_wg" + std::to_string(config.wg);
+            ggml_vk_create_pipeline(device, pipeline, name.c_str(), lengths[config.kernel][reduction], bytes[config.kernel][reduction],
+                "main", 5, sizeof(vk_mat_vec_push_constants), {config.rows, 1, 1}, {config.wg, config.rows, config.cols}, 1, true, true, config.sg);
         }
     }
 #endif
@@ -5777,12 +6128,30 @@ vk_pipeline ggml_vk_get_to_fp16(ggml_backend_vk_context * ctx, ggml_type type) {
 
 static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context * ctx, ggml_type a_type, ggml_type b_type, uint32_t num_cols, uint32_t m, uint32_t k) {
     VK_LOG_DEBUG("ggml_vk_get_dequantize_mul_mat_vec()");
+    if (!ctx->device->pipeline_small_m.empty() && num_cols >= 1 && num_cols <= 8) {
+        for (size_t i = vk_small_m_offsets[num_cols - 1]; i < vk_small_m_offsets[num_cols]; ++i) {
+            const auto & config = vk_small_m_configs[i];
+            if (a_type == config.type && b_type == config.activation && k == config.k && m == config.n &&
+                num_cols == config.cols && ctx->device->pipeline_small_m[i]) {
+                return ctx->device->pipeline_small_m[i];
+            }
+        }
+    }
     if (a_type == GGML_TYPE_Q8_0 && !ctx->device->pipeline_q8_shape.empty() &&
         ((num_cols == 1 && b_type == GGML_TYPE_F32) || (num_cols >= 2 && b_type == GGML_TYPE_Q8_1))) {
         for (size_t i = 0; i < std::size(vk_q8_shape_configs); ++i) {
             const auto & config = vk_q8_shape_configs[i];
             if (k == config.k && m == config.n && num_cols == config.cols && ctx->device->pipeline_q8_shape[i]) {
                 return ctx->device->pipeline_q8_shape[i];
+            }
+        }
+    }
+    if (!ctx->device->pipeline_d1_quant.empty() &&
+        ((num_cols == 1 && b_type == GGML_TYPE_F32) || (num_cols == 2 && b_type == GGML_TYPE_Q8_1))) {
+        for (size_t i = 0; i < std::size(vk_d1_quant_configs); ++i) {
+            const auto & config = vk_d1_quant_configs[i];
+            if (a_type == config.type && k == config.k && m == config.n && num_cols == config.cols && ctx->device->pipeline_d1_quant[i]) {
+                return ctx->device->pipeline_d1_quant[i];
             }
         }
     }
@@ -6912,6 +7281,16 @@ static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_
         return true;
     } else if (device->mmvq_mode == -1) {
         return false;
+    }
+
+    if (n == 1 && !device->pipeline_small_m.empty()) {
+        for (size_t i = vk_small_m_offsets[0]; i < vk_small_m_offsets[1]; ++i) {
+            const auto & config = vk_small_m_configs[i];
+            if (config.cols == 1 && config.activation == GGML_TYPE_Q8_1 && config.type == src0_type &&
+                config.k == k && config.n == m && device->pipeline_small_m[i]) {
+                return true;
+            }
+        }
     }
 
     // q6_k only has 2-byte alignment which makes it somewhat problematic,
