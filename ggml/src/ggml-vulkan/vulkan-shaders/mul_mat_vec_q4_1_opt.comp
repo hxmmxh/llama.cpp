@@ -1,0 +1,131 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+
+#if defined(Q41_ACT_Q8)
+#extension GL_EXT_integer_dot_product : require
+#define MMQ
+#define B_TYPE block_q8_1_x4
+#endif
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(Q41_VEC128)
+layout(binding = 0) readonly buffer A_QUANTS128 { uvec4 q41_words128[]; };
+
+uvec4 load_q41_payload(uint ib) {
+    const uint word = ib * 5u + 1u;
+    const uint alignment = word & 3u;
+    const uvec4 lo = q41_words128[word / 4u];
+    // An aligned final payload ends exactly at the end of the weight buffer.
+    if (alignment == 0u) { return lo; }
+    const uvec4 hi = q41_words128[word / 4u + 1u];
+    if (alignment == 1u) { return uvec4(lo.yzw, hi.x); }
+    if (alignment == 2u) { return uvec4(lo.zw, hi.xy); }
+    return uvec4(lo.w, hi.xyz);
+}
+#else
+uvec4 load_q41_payload(uint ib) {
+    return uvec4(data_a_packed32[ib].qs[0], data_a_packed32[ib].qs[1],
+                 data_a_packed32[ib].qs[2], data_a_packed32[ib].qs[3]);
+}
+#endif
+
+vec4 q41_unpack4(uint word) {
+    return vec4(word & 15u, (word >> 8u) & 15u,
+                (word >> 16u) & 15u, (word >> 24u) & 15u);
+}
+
+void compute_outputs(uint first_row, uint num_rows) {
+    uint a_offset, b_offset, d_offset;
+    get_offsets(a_offset, b_offset, d_offset);
+    const uint tid = gl_LocalInvocationID.x;
+    FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        [[unroll]] for (uint n = 0; n < NUM_ROWS; ++n) { temp[j][n] = FLOAT_TYPE(0); }
+    }
+
+#if defined(Q41_ACT_Q8)
+    b_offset /= 32u;
+    const uint segments = p.ncols / Q41_K_STEP;
+    const uint words_per_segment = Q41_K_STEP / 8u;
+    for (uint segment = tid; segment < segments; segment += BLOCK_SIZE) {
+        const uint block_k = segment / (32u / Q41_K_STEP);
+        const uint first_word = (segment % (32u / Q41_K_STEP)) * words_per_segment;
+        i32vec4 lo[NUM_ROWS], hi[NUM_ROWS];
+        vec2 dm[NUM_ROWS];
+        [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+            const uint ib = ((first_row + n) * p.ncols) / 32u + block_k + a_offset;
+            dm[n] = vec2(data_a_packed32[ib].dm);
+#if defined(Q41_VEC128)
+            const uvec4 payload = load_q41_payload(ib);
+#endif
+            [[unroll]] for (uint w = 0; w < words_per_segment; ++w) {
+#if defined(Q41_VEC128)
+                const uint word = payload[first_word + w];
+#else
+                const uint word = data_a_packed32[ib].qs[first_word + w];
+#endif
+                lo[n][w] = int(word & 0x0f0f0f0fu);
+                hi[n][w] = int((word >> 4u) & 0x0f0f0f0fu);
+            }
+        }
+        [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+            const uint ib = j * (p.batch_stride_b / 32u) + block_k + b_offset;
+            const uint outer = ib / 4u, inner = ib % 4u;
+            const vec2 ds = vec2(data_b[outer].ds[inner]);
+            i32vec4 bx, by;
+            [[unroll]] for (uint w = 0; w < words_per_segment; ++w) {
+                bx[w] = data_b[outer].qs[inner * 8u + first_word + w];
+                by[w] = data_b[outer].qs[inner * 8u + first_word + w + 4u];
+            }
+            [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+                int sum = 0;
+                [[unroll]] for (uint w = 0; w < words_per_segment; ++w) {
+                    sum += dotPacked4x8EXT(lo[n][w], bx[w]);
+                    sum += dotPacked4x8EXT(hi[n][w], by[w]);
+                }
+                temp[j][n] += FLOAT_TYPE(float(sum) * dm[n].x * ds.x +
+                                        dm[n].y * ds.y * (float(Q41_K_STEP) / 32.0));
+            }
+        }
+    }
+#else
+    const uint blocks = p.ncols / 32u;
+    for (uint block_k = tid; block_k < blocks; block_k += BLOCK_SIZE) {
+        uvec4 qs[NUM_ROWS];
+        vec2 dm[NUM_ROWS];
+        [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+            const uint ib = ((first_row + n) * p.ncols) / 32u + block_k + a_offset;
+            qs[n] = load_q41_payload(ib);
+            dm[n] = vec2(data_a_packed32[ib].dm);
+        }
+        [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+            const uint base = (j * p.batch_stride_b + b_offset) / 4u + block_k * 8u;
+            vec4 bx[4], by[4];
+            float sum_x = 0.0;
+            [[unroll]] for (uint w = 0; w < 4u; ++w) {
+                bx[w] = vec4(data_b_v4[base + w]);
+                by[w] = vec4(data_b_v4[base + w + 4u]);
+                sum_x += dot(bx[w] + by[w], vec4(1.0));
+            }
+            [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+                float sum_qx = 0.0;
+                [[unroll]] for (uint w = 0; w < 4u; ++w) {
+                    sum_qx += dot(q41_unpack4(qs[n][w]), bx[w]);
+                    sum_qx += dot(q41_unpack4(qs[n][w] >> 4u), by[w]);
+                }
+                temp[j][n] += FLOAT_TYPE(dm[n].x * sum_qx + dm[n].y * sum_x);
+            }
+        }
+    }
+#endif
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+    if (first_row >= p.stride_d) { return; }
+    compute_outputs(first_row, min(NUM_ROWS, p.stride_d - first_row));
+}

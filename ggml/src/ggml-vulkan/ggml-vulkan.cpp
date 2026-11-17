@@ -92,6 +92,10 @@ enum vk_small_m_kernel {
     VK_SMALL_M_Q8_F32,
     VK_SMALL_M_Q8_Q8,
     VK_SMALL_M_Q8_K16,
+    VK_SMALL_M_Q41_F32_VEC,
+    VK_SMALL_M_Q41_Q8_GENERIC,
+    VK_SMALL_M_Q41_Q8_K16,
+    VK_SMALL_M_Q41_Q8_K8,
 };
 
 struct vk_small_m_config {
@@ -121,6 +125,8 @@ static constexpr vk_small_m_config vk_small_m_configs[] = {
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2048, 131072, 1, 4, 16, 16, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_F32, 6656, 2048, 1, 2, 32, 32, VK_SMALL_M_Q8_F32},
     {GGML_TYPE_Q8_0, GGML_TYPE_F32, 10240, 2048, 1, 2, 32, 32, VK_SMALL_M_Q8_F32},
+    {GGML_TYPE_Q4_1, GGML_TYPE_F32, 2048, 3072, 1, 4, 8, 8, VK_SMALL_M_Q41_F32_VEC},
+    {GGML_TYPE_Q4_1, GGML_TYPE_F32, 6656, 2048, 1, 2, 16, 16, VK_SMALL_M_Q41_F32_VEC},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 2, 4, 16, 16, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 2, 1, 16, 64, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 2, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
@@ -146,6 +152,7 @@ static constexpr vk_small_m_config vk_small_m_configs[] = {
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 2, 4, 8, 32, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 2, 4, 16, 16, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 2, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q4_1, GGML_TYPE_Q8_1, 6656, 2048, 2, 2, 32, 32, VK_SMALL_M_Q41_Q8_K16},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 3, 4, 16, 16, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 3, 1, 16, 64, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 3, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
@@ -177,6 +184,7 @@ static constexpr vk_small_m_config vk_small_m_configs[] = {
     {GGML_TYPE_Q6_K, GGML_TYPE_Q8_1, 10240, 2048, 4, 2, 8, 8, VK_SMALL_M_Q6_FIVE_REUSE},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 256, 131072, 4, 8, 8, 8, VK_SMALL_M_Q8_Q8},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 4, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q4_1, GGML_TYPE_Q8_1, 6656, 2048, 4, 4, 8, 32, VK_SMALL_M_Q41_Q8_GENERIC},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 5, 4, 16, 16, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 5, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
     {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 2048, 512, 5, 2, 8, 8, VK_SMALL_M_Q4_VEC128},
@@ -202,6 +210,7 @@ static constexpr vk_small_m_config vk_small_m_configs[] = {
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 5, 4, 8, 32, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 5, 4, 16, 16, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 5, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q4_1, GGML_TYPE_Q8_1, 6656, 2048, 5, 4, 8, 32, VK_SMALL_M_Q41_Q8_GENERIC},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 6, 4, 16, 16, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 8, 6, 1, 16, 64, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 2048, 6, 2, 16, 16, VK_SMALL_M_BF16_F32},
@@ -228,6 +237,7 @@ static constexpr vk_small_m_config vk_small_m_configs[] = {
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 6, 4, 8, 32, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 6, 4, 8, 32, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 6, 4, 16, 16, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q4_1, GGML_TYPE_Q8_1, 6656, 2048, 6, 2, 32, 32, VK_SMALL_M_Q41_Q8_K8},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 7, 4, 16, 16, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 2304, 1, 7, 1, 16, 64, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_Q4_K, GGML_TYPE_Q8_1, 256, 131072, 7, 4, 8, 8, VK_SMALL_M_Q4_VEC128},
@@ -256,6 +266,7 @@ static constexpr vk_small_m_config vk_small_m_configs[] = {
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 7, 4, 8, 32, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 7, 4, 8, 32, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 7, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q4_1, GGML_TYPE_Q8_1, 6656, 2048, 7, 2, 16, 16, VK_SMALL_M_Q41_Q8_GENERIC},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 256, 131072, 8, 4, 16, 16, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 8, 8, 1, 16, 64, VK_SMALL_M_BF16_F32},
     {GGML_TYPE_BF16, GGML_TYPE_F32, 2048, 512, 8, 2, 16, 64, VK_SMALL_M_BF16_F32},
@@ -288,9 +299,10 @@ static constexpr vk_small_m_config vk_small_m_configs[] = {
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 2304, 1, 8, 4, 8, 32, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 6656, 2048, 8, 4, 8, 32, VK_SMALL_M_Q8_K16},
     {GGML_TYPE_Q8_0, GGML_TYPE_Q8_1, 10240, 2048, 8, 4, 8, 32, VK_SMALL_M_Q8_K16},
+    {GGML_TYPE_Q4_1, GGML_TYPE_Q8_1, 6656, 2048, 8, 4, 8, 8, VK_SMALL_M_Q41_Q8_GENERIC},
 };
 
-static constexpr size_t vk_small_m_offsets[] = {0, 20, 45, 66, 76, 101, 127, 155, 187};
+static constexpr size_t vk_small_m_offsets[] = {0, 22, 48, 69, 80, 106, 133, 162, 195};
 
 static vk_device_architecture get_device_architecture(const vk::PhysicalDevice& device) {
     vk::PhysicalDeviceProperties props = device.getProperties();
@@ -2512,6 +2524,10 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             {mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem_len, mul_mat_vec_q8_0_f32_f32_subgroup_len},
             {mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_len, 0},
             {mul_mat_vec_q8_0_q8_1_f32_m4_k16_len, mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup_len},
+            {mul_mat_vec_q41_f32_vec_len, mul_mat_vec_q41_f32_vec_shared_len},
+            {mul_mat_vec_q4_1_q8_1_f32_subgroup_no_shmem_len, mul_mat_vec_q4_1_q8_1_f32_subgroup_len},
+            {mul_mat_vec_q41_q8_k16_len, mul_mat_vec_q41_q8_k16_shared_len},
+            {mul_mat_vec_q41_q8_k8_len, mul_mat_vec_q41_q8_k8_shared_len},
         };
         const void * bytes[][2] = {
             {mul_mat_vec_bf16_f32_f32_subgroup_no_shmem_data, mul_mat_vec_bf16_f32_f32_subgroup_data},
@@ -2526,6 +2542,10 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             {mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem_data, mul_mat_vec_q8_0_f32_f32_subgroup_data},
             {mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem_data, nullptr},
             {mul_mat_vec_q8_0_q8_1_f32_m4_k16_data, mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup_data},
+            {mul_mat_vec_q41_f32_vec_data, mul_mat_vec_q41_f32_vec_shared_data},
+            {mul_mat_vec_q4_1_q8_1_f32_subgroup_no_shmem_data, mul_mat_vec_q4_1_q8_1_f32_subgroup_data},
+            {mul_mat_vec_q41_q8_k16_data, mul_mat_vec_q41_q8_k16_shared_data},
+            {mul_mat_vec_q41_q8_k8_data, mul_mat_vec_q41_q8_k8_shared_data},
         };
         const char * names[][2] = {
             {"mul_mat_vec_bf16_f32_f32_subgroup_no_shmem", "mul_mat_vec_bf16_f32_f32_subgroup"},
@@ -2540,12 +2560,17 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             {"mul_mat_vec_q8_0_f32_f32_subgroup_no_shmem", "mul_mat_vec_q8_0_f32_f32_subgroup"},
             {"mul_mat_vec_q8_0_q8_1_f32_subgroup_no_shmem", nullptr},
             {"mul_mat_vec_q8_0_q8_1_f32_m4_k16", "mul_mat_vec_q8_0_q8_1_f32_m4_k16_subgroup"},
+            {"mul_mat_vec_q41_f32_vec", "mul_mat_vec_q41_f32_vec_shared"},
+            {"mul_mat_vec_q4_1_q8_1_f32_subgroup_no_shmem", "mul_mat_vec_q4_1_q8_1_f32_subgroup"},
+            {"mul_mat_vec_q41_q8_k16", "mul_mat_vec_q41_q8_k16_shared"},
+            {"mul_mat_vec_q41_q8_k8", "mul_mat_vec_q41_q8_k8_shared"},
         };
         device->pipeline_small_m.resize(std::size(vk_small_m_configs));
         for (size_t i = 0; i < std::size(vk_small_m_configs); ++i) {
             const auto & config = vk_small_m_configs[i];
             const bool m1_q8 = config.cols == 1 && config.activation == GGML_TYPE_Q8_1;
-            if ((config.cols == 8 && getenv("GGML_VK_DISABLE_M8_OPT") != nullptr) ||
+            if ((config.type == GGML_TYPE_Q4_1 && getenv("GGML_VK_DISABLE_Q41_OPT") != nullptr) ||
+                (config.cols == 8 && getenv("GGML_VK_DISABLE_M8_OPT") != nullptr) ||
                 (m1_q8 && getenv("GGML_VK_ENABLE_M1_Q8") == nullptr) ||
                 (config.cols == 4 && getenv("GGML_VK_DISABLE_M4_QUANT_LOAD_OPT") != nullptr) ||
                 (config.type == GGML_TYPE_Q8_0 && getenv("GGML_VK_DISABLE_Q8_SHAPE_OPT") != nullptr) ||

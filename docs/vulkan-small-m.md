@@ -79,3 +79,7 @@ M8 integration passes 390 real-weight complete-output hashes (310 unchanged prio
 The follow-up selects 32 additional M8 profiles across the same ten shapes and four weight types. `GGML_VK_DISABLE_M8_OPT=1` disables only these profiles. M1..M7 and the M1 Q8_1 opt-in profiles remain unchanged. [Follow-up evidence](../../../cpu_infer/experiments/windows-cpu/windows_core_ultra_7_255h/20261117-135017-vulkan-s17-m8/analysis/summary.json).
 
 For the 1.7B Q4_K_M main model with the same 512-token prefix state, M8 forward+synchronize time decreases from 50.834 ms to 35.904 ms (29.37%). All three independent processes improve, by 26.32% to 33.03%. Complete-logit NRMSE is 6.80e-8, maximum absolute difference is 1.14e-5, and all eight row argmax values agree. M9 remains bitwise unchanged; its observed mean time increases by 2.73%, with no hardware-counter attribution.
+
+## Q4_1 profiles
+
+A separate real-weight QKV/down study adds eight Q4_1 profiles: QKV M1 and down M1, M2, M4..M8. The final build uses six matched ON/OFF rounds with Q6_K controls. See [Q4_1 profiles and validation](vulkan-q41-small-m.md).
