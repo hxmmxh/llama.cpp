@@ -618,6 +618,14 @@ enum topk_moe_mode {
     TOPK_MOE_COUNT,
 };
 
+enum q8_producer_mode {
+    Q8_PRODUCER_NONE,
+    Q8_PRODUCER_GLU,
+    Q8_PRODUCER_ATTN_MUL,
+    Q8_PRODUCER_ATTN_RMS,
+    Q8_PRODUCER_HEAD_RMS,
+};
+
 enum rms_norm_mode {
     RMS_NORM_MUL,
     RMS_NORM_MUL_ADD,
@@ -860,6 +868,11 @@ struct vk_device_struct {
     vk_pipeline pipeline_group_norm_f32;
     std::array<vk_pipeline, 3> pipeline_rms_norm_f32;
     std::array<vk_pipeline, 3> pipeline_rms_norm_mul_f32;
+    vk_pipeline pipeline_rms_norm_mul_q8_1_ffn;
+    vk_pipeline pipeline_rms_norm_mul_q8_1_attn;
+    vk_pipeline pipeline_rms_norm_mul_q8_1_head;
+    vk_pipeline pipeline_geglu_q8_1;
+    vk_pipeline pipeline_attn_mul_q8_1;
     std::array<vk_pipeline, 3> pipeline_rms_norm_mul_add_f32;
     std::array<vk_pipeline, 3> pipeline_rms_norm_mul_add_mul_f32;
     vk_pipeline pipeline_rms_norm_mul_add_partials_f32;
@@ -1294,6 +1307,8 @@ struct ggml_backend_vk_context {
     // QSA indexer gather+add+top_k fused into one radix-select
     bool fused_topk_qsa {};
     bool fused_hc_post_gate {};
+    bool fused_ffn_rms_q8_1 {};
+    q8_producer_mode fused_q8_producer {Q8_PRODUCER_NONE};
     rms_norm_mode fused_rms_norm_mode {RMS_NORM_COUNT};
 
     // for GGML_VK_PERF_LOGGER

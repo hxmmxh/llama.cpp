@@ -1,5 +1,7 @@
 #include "models.h"
 
+#include <cstdlib>
+
 void llama_model_spark2_5::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
     ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW, hparams.n_swa);
@@ -165,6 +167,11 @@ llama_model_spark2_5::graph::graph(const llama_model & model, const llm_graph_pa
     ggml_tensor * cur = build_norm(inpL, model.output_norm, nullptr, LLM_NORM_RMS, -1);
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
+    const char * head_q8 = getenv("GGML_VK_HEAD_RMS_Q8_1");
+    if (!cparams.embeddings && head_q8 && std::atoi(head_q8) != 0) {
+        // DSpark layer inputs are captured before this normalization.
+        res->t_embd = nullptr;
+    }
 
     cur = build_lora_mm(model.output, cur);
     cb(cur, "result_output", -1);

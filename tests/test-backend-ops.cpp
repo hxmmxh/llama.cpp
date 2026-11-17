@@ -2839,12 +2839,14 @@ struct test_spark_ffn_mmvq : public test_case {
     const int64_t n_tokens;
     const bool escape_norm, escape_glu;
     const int64_t hidden, intermediate;
+    const ggml_type up_type;
+    const ggml_prec up_prec;
 
-    test_spark_ffn_mmvq(ggml_type down_type, int64_t n_tokens, bool escape_norm = false, bool escape_glu = false, int64_t hidden = 2560, int64_t intermediate = 10240)
-        : down_type(down_type), n_tokens(n_tokens), escape_norm(escape_norm), escape_glu(escape_glu), hidden(hidden), intermediate(intermediate) {}
+    test_spark_ffn_mmvq(ggml_type down_type, int64_t n_tokens, bool escape_norm = false, bool escape_glu = false, int64_t hidden = 2560, int64_t intermediate = 10240, ggml_type up_type = GGML_TYPE_Q4_K, ggml_prec up_prec = GGML_PREC_UNDEFINED)
+        : down_type(down_type), n_tokens(n_tokens), escape_norm(escape_norm), escape_glu(escape_glu), hidden(hidden), intermediate(intermediate), up_type(up_type), up_prec(up_prec) {}
 
     std::string vars() override {
-        return VARS_TO_STR6(down_type, n_tokens, escape_norm, escape_glu, hidden, intermediate);
+        return VARS_TO_STR6(down_type, n_tokens, escape_norm, escape_glu, hidden, intermediate) + "," + VARS_TO_STR2(up_type, up_prec);
     }
 
     std::string op_desc(ggml_tensor * t) override {
@@ -2859,7 +2861,7 @@ struct test_spark_ffn_mmvq : public test_case {
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * src      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
         ggml_tensor * gate_w   = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_K, hidden, intermediate);
-        ggml_tensor * up_w     = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_K, hidden, intermediate);
+        ggml_tensor * up_w     = ggml_new_tensor_2d(ctx, up_type, hidden, intermediate);
         ggml_tensor * down_w   = ggml_new_tensor_2d(ctx, down_type, intermediate, hidden);
         ggml_tensor * residual = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
         ggml_tensor * norm_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hidden);
@@ -2869,11 +2871,64 @@ struct test_spark_ffn_mmvq : public test_case {
         }
         ggml_tensor * gate = ggml_mul_mat(ctx, gate_w, norm);
         ggml_tensor * up   = ggml_mul_mat(ctx, up_w, norm);
+        ggml_prec_set_src(up, up_prec, 1);
         ggml_tensor * glu  = ggml_geglu_split(ctx, gate, up);
         if (escape_glu) {
             ggml_set_output(glu);
         }
         return ggml_add(ctx, ggml_mul_mat(ctx, down_w, glu), residual);
+    }
+};
+
+
+struct test_spark_q8_producer : public test_case {
+    const std::string position;
+    const int64_t n_tokens;
+    const bool escape;
+    const ggml_type type;
+
+    test_spark_q8_producer(std::string position, int64_t n_tokens, bool escape = false, ggml_type type = GGML_TYPE_COUNT)
+        : position(position), n_tokens(n_tokens), escape(escape),
+          type(type == GGML_TYPE_COUNT ? (position == "glu" || position == "attn_rms" ? GGML_TYPE_Q6_K : GGML_TYPE_Q8_0) : type) {}
+
+    std::string vars() override { return VARS_TO_STR4(position, n_tokens, escape, type); }
+    std::string op_desc(ggml_tensor *) override { return "SPARK_Q8_PRODUCER"; }
+    bool run_whole_graph() override { return true; }
+    double max_nmse_err() override { return 5e-3; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        const int64_t k = position == "glu" ? 6656 : 2048;
+        const int64_t n = position == "head" ? 32768 : (position == "attn_rms" ? 3072 : 2048);
+        auto * weight = ggml_new_tensor_2d(ctx, type, k, n);
+        ggml_tensor * prepared;
+        ggml_tensor * rms = nullptr;
+        if (position == "glu") {
+            auto * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n_tokens);
+            auto * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n_tokens);
+            prepared = ggml_geglu_split(ctx, a, b);
+        } else if (position == "attn_mul") {
+            auto * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 256, 8, n_tokens);
+            auto * b = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, 8, n_tokens);
+            prepared = ggml_reshape_2d(ctx, ggml_mul(ctx, a, b), k, n_tokens);
+        } else {
+            auto * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n_tokens);
+            auto * norm_w = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, k);
+            rms = ggml_rms_norm(ctx, a, 1e-6f);
+            prepared = ggml_mul(ctx, rms, norm_w);
+        }
+        auto * result = ggml_mul_mat(ctx, weight, prepared);
+        if (position == "attn_rms") {
+            auto * gate_w = ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, k, 8);
+            auto * gate = ggml_mul_mat(ctx, gate_w, prepared);
+            ggml_set_output(prepared);
+            result = ggml_concat(ctx, ggml_concat(ctx, result, gate, 0), prepared, 0);
+        }
+        if (escape) {
+            auto * exported = position == "attn_rms" ? rms : prepared;
+            ggml_set_output(exported);
+            result = ggml_concat(ctx, result, exported, 0);
+        }
+        return result;
     }
 };
 
@@ -13188,6 +13243,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_spark_ffn_mmvq(GGML_TYPE_Q8_0, 1));
     test_cases.emplace_back(new test_spark_ffn_mmvq(GGML_TYPE_Q4_K, 1, false, true));
     test_cases.emplace_back(new test_spark_ffn_mmvq(GGML_TYPE_Q6_K, 1, false, true));
+    for (int64_t tokens : {2, 3, 4, 7, 8}) {
+        test_cases.emplace_back(new test_spark_ffn_mmvq(GGML_TYPE_Q4_K, tokens, false, false, 2048, 6656));
+    }
+    test_cases.emplace_back(new test_spark_ffn_mmvq(GGML_TYPE_Q6_K, 4, false, false, 2560, 10240));
+    test_cases.emplace_back(new test_spark_ffn_mmvq(GGML_TYPE_Q4_K, 4, true, false, 2048, 6656));
+    test_cases.emplace_back(new test_spark_ffn_mmvq(GGML_TYPE_Q4_K, 4, false, false, 2048, 6656, GGML_TYPE_BF16));
+    test_cases.emplace_back(new test_spark_ffn_mmvq(GGML_TYPE_Q4_K, 4, false, false, 2048, 6656, GGML_TYPE_Q4_K, GGML_PREC_F32));
+    for (const std::string position : {"glu", "attn_mul", "attn_rms", "head"}) {
+        for (int64_t tokens : {1, 2, 4, 8}) {
+            test_cases.emplace_back(new test_spark_q8_producer(position, tokens));
+        }
+        test_cases.emplace_back(new test_spark_q8_producer(position, 4, true));
+    }
+    for (const std::string position : {"glu", "attn_mul", "head"}) {
+        test_cases.emplace_back(new test_spark_q8_producer(position, 4, false, GGML_TYPE_BF16));
+    }
+    test_cases.emplace_back(new test_spark_q8_producer("glu", 4, false, GGML_TYPE_Q4_K));
+    test_cases.emplace_back(new test_spark_q8_producer("attn_rms", 4, false, GGML_TYPE_Q4_K));
+    test_cases.emplace_back(new test_spark_q8_producer("head", 9));
     for (ggml_type type : {GGML_TYPE_Q4_K, GGML_TYPE_Q6_K}) {
         test_cases.emplace_back(new test_spark_qkv_gate(type, 1, false, false, 2048));
         test_cases.emplace_back(new test_spark_qkv_gate(type, 1, false, true, 2048));

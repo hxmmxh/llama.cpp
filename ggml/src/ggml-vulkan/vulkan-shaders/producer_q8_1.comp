@@ -1,0 +1,61 @@
+#version 450
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+
+#include "types.glsl"
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(binding = 0) readonly buffer A { float data_a[]; };
+layout(binding = 1) readonly buffer B { float data_b[]; };
+layout(binding = 2) writeonly buffer Q { block_q8_1_x4 data_q[]; };
+layout(push_constant) uniform parameter {
+    uint ne;
+    uint ncols;
+    uint head_dim;
+    uint heads;
+} p;
+
+float producer(float a, float b) {
+#if PRODUCER_GEGLU
+    const float val = 0.79788456080286535587989211986876f*a*(1.0f + 0.044715f*a*a);
+    return 0.5f*a*(2.0f - 2.0f / (exp(2 * val) + 1)) * b;
+#else
+    return a * b;
+#endif
+}
+
+void main() {
+    const uint tid = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
+    const uint index = gl_WorkGroupID.x * 128 + tid * 4;
+    if (index >= p.ne) {
+        return;
+    }
+#if PRODUCER_GEGLU
+    const uint b_index = index;
+    vec4 vals = vec4(producer(data_a[index], data_b[b_index]),
+                     producer(data_a[index + 1], data_b[b_index + 1]),
+                     producer(data_a[index + 2], data_b[b_index + 2]),
+                     producer(data_a[index + 3], data_b[b_index + 3]));
+#else
+    const uint row = index / p.ncols;
+    const uint head = (index % p.ncols) / p.head_dim;
+    const float gate = data_b[row * p.heads + head];
+    vec4 vals = vec4(data_a[index], data_a[index + 1], data_a[index + 2], data_a[index + 3]) * gate;
+#endif
+    const vec4 abs_vals = abs(vals);
+    const float thread_max = max(max(abs_vals.x, abs_vals.y), max(abs_vals.z, abs_vals.w));
+    const float amax = subgroupClusteredMax(thread_max, 8);
+    const float d = amax / 127.0;
+    const float d_inv = d != 0.0 ? 1.0 / d : 0.0;
+    vals = round(vals * d_inv);
+    const uint ib = index / 32;
+    const uint iqs = (index / 4) % 8;
+    data_q[ib / 4].qs[(ib % 4) * 8 + iqs] = pack32(i8vec4(round(vals)));
+    const float thread_sum = vals.x + vals.y + vals.z + vals.w;
+    const float block_sum = subgroupClusteredAdd(thread_sum, 8);
+    if (iqs == 0) {
+        data_q[ib / 4].ds[ib % 4] = f16vec2(vec2(d, block_sum * d));
+    }
+}

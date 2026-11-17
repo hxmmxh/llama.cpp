@@ -17,6 +17,12 @@ These original M4 profiles are selected automatically for eligible Intel integer
 
 RMSNorm/scale/residual fusion, GELU-times-up, RoPE and KV writes already accept multiple rows. Existing GQA, scalar attention, and split-K selection also cover small M; the regression matrix now exercises F16/Q8_0 KV attention and normalization throughout M1..M8. Their algorithms and KV formats are unchanged by the projection integration.
 
+## Producer activation quantization
+
+The optional [FFN RMSNorm fusion](vulkan-ffn-rms-q8.md) writes Q8_1 activations directly for gate/up. Additional [producer fusions](vulkan-producer-q8.md) cover GEGLU before down, attention gate multiplication before Wo, attention RMSNorm before QKV, and final RMSNorm before the LM head. Each has a separate switch and is disabled by default.
+
+These paths retain existing matrix kernels and precision choices. Attention RMSNorm also writes FP32 for the BF16 gate projection; final RMSNorm preserves the embedding path when requested. Measurements use independent graphs and do not establish whole-model throughput gains.
+
 ## DSpark buffers and scheduling
 
 Device DSpark uses a persistent backend host buffer for token and probability readback. On Vulkan this permits asynchronous copies into the backend host allocation. This buffer change also applies when asynchronous handoff is disabled.

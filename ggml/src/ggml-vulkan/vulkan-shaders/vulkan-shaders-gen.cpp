@@ -875,6 +875,10 @@ void process_shaders() {
     string_to_spv("mul_mat_vec_nc_f16_f32", "mul_mat_vec_nc.comp", {{"A_TYPE", "float16_t"}, {"A_TYPEV4", "f16vec4"}, {"B_TYPE", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}});
 
     // Norms
+    string_to_spv("rms_norm_mul_q8_1_ffn", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}, {"RMS_NORM_Q8_1_FUSION", "1"}}));
+    string_to_spv("rms_norm_mul_q8_1_attn", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}, {"RMS_NORM_Q8_1_FUSION", "1"}, {"RMS_NORM_Q8_1_WRITE_F32", "1"}}));
+    string_to_spv("geglu_q8_1", "producer_q8_1.comp", merge_maps(base_dict, {{"PRODUCER_GEGLU", "1"}}));
+    string_to_spv("attn_mul_q8_1", "producer_q8_1.comp", merge_maps(base_dict, {{"PRODUCER_GEGLU", "0"}}));
     string_to_spv("norm_f32", "norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("group_norm_f32", "group_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
     for (bool use_subgroups : {false, true}) {

@@ -1,5 +1,9 @@
 #version 450
 
+#if RMS_NORM_Q8_1_FUSION
+#extension GL_KHR_shader_subgroup_clustered : require
+#endif
+
 #include "generic_binary_head.glsl"
 #include "types.glsl"
 
@@ -54,6 +58,42 @@ layout (constant_id = 2) const bool do_post_multiply = false;
 #endif
 
 shared FLOAT_TYPE sumsh[BLOCK_SIZE];
+
+#if RMS_NORM_Q8_1_FUSION
+layout (binding = 3) writeonly buffer Q {block_q8_1_x4 data_q[];};
+
+void quantize_rms_row(uint row, uint ncols, uint a_offset, uint b_offset, uint d_offset, float scale) {
+    // Subgroup lanes need not follow local invocation order.
+    const uint qtid = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
+    for (uint col = qtid * 4; col < ncols; col += BLOCK_SIZE * 4) {
+        const vec4 x = vec4(data_a[a_offset + col], data_a[a_offset + col + 1], data_a[a_offset + col + 2], data_a[a_offset + col + 3]);
+        const vec4 w = vec4(data_b[b_offset + col], data_b[b_offset + col + 1], data_b[b_offset + col + 2], data_b[b_offset + col + 3]);
+        vec4 vals = scale * x * w;
+#if RMS_NORM_Q8_1_WRITE_F32
+        data_d[d_offset + col] = vals.x;
+        data_d[d_offset + col + 1] = vals.y;
+        data_d[d_offset + col + 2] = vals.z;
+        data_d[d_offset + col + 3] = vals.w;
+#endif
+        const vec4 abs_vals = abs(vals);
+        const float thread_max = max(max(abs_vals.x, abs_vals.y), max(abs_vals.z, abs_vals.w));
+        const float amax = subgroupClusteredMax(thread_max, 8);
+        const float d = amax / 127.0;
+        const float d_inv = d != 0.0 ? 1.0 / d : 0.0;
+        vals = round(vals * d_inv);
+
+        const uint ib = (row * ncols + col) / 32;
+        const uint iqs = (col / 4) % 8;
+        data_q[ib / 4].qs[(ib % 4) * 8 + iqs] = pack32(i8vec4(round(vals)));
+
+        const float thread_sum = vals.x + vals.y + vals.z + vals.w;
+        const float block_sum = subgroupClusteredAdd(thread_sum, 8);
+        if (iqs == 0) {
+            data_q[ib / 4].ds[ib % 4] = f16vec2(vec2(d, block_sum * d));
+        }
+    }
+}
+#endif
 
 void rms_norm(uint num_iters) {
     const uint ncols     = p.ne00;
@@ -129,6 +169,9 @@ void rms_norm(uint num_iters) {
             const FLOAT_TYPE mean = sum / FLOAT_TYPE(ncols);
             const FLOAT_TYPE scale = inversesqrt(mean + FLOAT_TYPE(p.param1));
 
+#if RMS_NORM_Q8_1_FUSION
+            quantize_rms_row(row, ncols, a_offset, b_offset, d_offset, scale);
+#else
             if (do_multiply) {
                 if (ncols > p.ne10) {
                     [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
@@ -167,6 +210,7 @@ void rms_norm(uint num_iters) {
                     data_d[d_offset + col] = D_TYPE(scale * FLOAT_TYPE(data_a[a_offset + col]));
                 }
             }
+#endif
 #if RMS_NORM_ROPE_FUSION
             barrier();
             rope_params rp = p.rope;
