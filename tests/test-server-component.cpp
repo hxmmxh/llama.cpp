@@ -553,6 +553,37 @@ static void test_glob_match(testing & t) {
     });
 }
 
+static void test_fixed_d3_ffn_defaults(testing & t) {
+    common_params p;
+    p.n_parallel = 1;
+    p.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    p.speculative.types = {COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK};
+    p.speculative.draft.probabilistic = true;
+    t.assert_true("fixed D3", server_use_fixed_d3_ffn_defaults(p));
+    p.speculative.types = {COMMON_SPECULATIVE_TYPE_NONE, COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK};
+    t.assert_true("explicit --spec-type draft-dspark", server_use_fixed_d3_ffn_defaults(p));
+    p.speculative.types.push_back(COMMON_SPECULATIVE_TYPE_NGRAM_SIMPLE);
+    t.assert_true("combined draft methods", !server_use_fixed_d3_ffn_defaults(p));
+    p.speculative.types.pop_back();
+
+    for (int depth : {0, 1, 2, 4, 7}) {
+        p.speculative.draft.n_max = depth;
+        t.assert_true("other fixed depth", !server_use_fixed_d3_ffn_defaults(p));
+    }
+    p.speculative.draft.n_max = 3;
+    p.speculative.adaptive = true;
+    t.assert_true("adaptive D3", !server_use_fixed_d3_ffn_defaults(p));
+    p.speculative.adaptive = false;
+    p.cache_type_v_swa = GGML_TYPE_Q8_0;
+    t.assert_true("mixed SWA cache", !server_use_fixed_d3_ffn_defaults(p));
+    p.cache_type_v_swa = GGML_TYPE_COUNT;
+    p.speculative.draft.cache_type_k = GGML_TYPE_Q8_0;
+    t.assert_true("quantized draft KV", !server_use_fixed_d3_ffn_defaults(p));
+    p.speculative.draft.cache_type_k = GGML_TYPE_F16;
+    p.speculative.types = {COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE};
+    t.assert_true("other draft method", !server_use_fixed_d3_ffn_defaults(p));
+}
+
 int main(int argc, char ** argv) {
     testing t;
 
@@ -576,6 +607,7 @@ int main(int argc, char ** argv) {
     t.test("decision_depth",  test_decision_depth);
     t.test("glob_match",      test_glob_match);
     t.test("dry_sequence_breakers", test_dry_sequence_breakers);
+    t.test("fixed_d3_ffn_defaults", test_fixed_d3_ffn_defaults);
 
     return t.summary();
 }

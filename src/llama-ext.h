@@ -55,6 +55,7 @@ LLAMA_API void llama_quant_free(quantize_state_impl * qs);
 
 // Experimental single-sequence DSpark path. Probability vectors remain available for rejection verification.
 LLAMA_API bool llama_dspark_device_init(llama_context * target, llama_context * draft);
+LLAMA_API void llama_dspark_device_enable_fixed_d3_ffn(llama_context * target, llama_context * draft);
 LLAMA_API void llama_dspark_device_reset(llama_context * target, llama_context * draft);
 LLAMA_API void llama_dspark_device_set_features(llama_context * target, llama_context * draft, size_t row_offset, size_t n_rows);
 LLAMA_API void llama_dspark_device_set_sampling(llama_context * draft, const float * uniforms, size_t count, float temperature);

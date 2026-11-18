@@ -2273,3 +2273,26 @@ void server_role::notify_to_router(const std::string & state, const json & paylo
     fprintf(cmd_out, "%s%s\n", CMD_CHILD_TO_ROUTER_STATE, safe_json_to_str(data).c_str());
     fflush(cmd_out);
 }
+
+bool server_use_fixed_d3_ffn_defaults(const common_params & params) {
+    const auto & spec = params.speculative;
+    const auto f16_swa = [](ggml_type type) { return type == GGML_TYPE_COUNT || type == GGML_TYPE_F16; };
+    const auto no_overrides = [](const std::vector<llama_model_tensor_buft_override> & overrides) {
+        return overrides.empty() || overrides.front().pattern == nullptr;
+    };
+    bool dspark = false;
+    for (auto type : spec.types) {
+        if (type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) {
+            dspark = true;
+        } else if (type != COMMON_SPECULATIVE_TYPE_NONE) {
+            return false;
+        }
+    }
+    return dspark && no_overrides(params.tensor_buft_overrides) && no_overrides(spec.draft.tensor_buft_overrides) &&
+            !spec.adaptive && !spec.has_synth() && spec.draft.probabilistic && spec.draft.n_max == 3 &&
+            spec.draft.n_min == 0 && params.n_parallel == 1 && !params.embedding && params.mmproj.path.empty() &&
+            params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_ENABLED && !params.no_kv_offload &&
+            params.cache_type_k == GGML_TYPE_F16 && params.cache_type_v == GGML_TYPE_F16 &&
+            f16_swa(params.cache_type_k_swa) && f16_swa(params.cache_type_v_swa) && !params.kv_tail_tokens &&
+            spec.draft.cache_type_k == GGML_TYPE_F16 && spec.draft.cache_type_v == GGML_TYPE_F16;
+}

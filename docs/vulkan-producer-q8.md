@@ -1,6 +1,6 @@
 # Experimental producer-to-Q8_1 fusions
 
-These Intel Vulkan experiments extend the [FFN RMSNorm fusion](vulkan-ffn-rms-q8.md). Set each switch before backend initialization. All switches are disabled by default.
+These Intel Vulkan experiments extend the [FFN RMSNorm fusion](vulkan-ffn-rms-q8.md). Set each switch before backend initialization. The [Arc 140T fixed-D3 server configuration](vulkan-optimizations.md) enables the GEGLU fusion by default. Set `GGML_VK_GLU_Q8_1=0` to opt out. The three attention and head switches remain opt-in.
 
 | Position | Switch | Activation shape | Projection output shape |
 | --- | --- | --- | --- |
@@ -38,4 +38,4 @@ Wo also reduced M2 time by 10.77% with an interval of 6.39% to 14.59%. The other
 
 Adding GEGLU fusion to the complete M4 FFN with the previous FC1 fusion enabled in both modes reduced paired time by 11.83%, interval 3.45% to 17.37%, with 10/12 faster pairs. A separate same-binary trace confirmed four command-buffer submissions without FC2 fusion and three with it; the independent GEGLU graph changed from two to one. Thus the graph-level effect also includes submission changes, and is not a measurement of saved memory traffic alone. The complete gain has not been separated into kernel, cache and submission costs.
 
-CPU and Vulkan each passed 26 new backend cases. All 672 formal complete-output comparisons and the real-model checks were bitwise equal. The full evidence audit passed, including 3987 frozen source files, four executables and 1994 raw output hashes. See the [full results, all shapes and retained regressions](../../../reports/igpu中耗时分布分析/20261117-153952-vulkan-producer-q8/README.md). All switches remain off by default.
+CPU and Vulkan each passed 26 new backend cases. All 672 formal complete-output comparisons and the real-model checks were bitwise equal. The full evidence audit passed, including 3987 frozen source files, four executables and 1994 raw output hashes. See the [full results, all shapes and retained regressions](../../../reports/igpu中耗时分布分析/20261117-153952-vulkan-producer-q8/README.md).

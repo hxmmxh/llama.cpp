@@ -16,6 +16,7 @@
 #include "common.h"
 #include "fit.h"
 #include "llama.h"
+#include "../../src/llama-ext.h"
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
@@ -1502,6 +1503,9 @@ private:
 
         if (spec) {
             SRV_TRC("%s", "speculative decoding context initialized\n");
+            if (ctx_dft && common_speculative_n_max(spec.get()) == 3 && server_use_fixed_d3_ffn_defaults(params_base)) {
+                llama_dspark_device_enable_fixed_d3_ffn(ctx_tgt, ctx_dft);
+            }
         } else {
             spec_init.reset();
             ctx_dft   = nullptr;

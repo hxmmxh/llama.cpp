@@ -3845,7 +3845,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
     const bool rms_subgroups = (device->vendor_id == VK_VENDOR_ID_INTEL || device->vendor_id == VK_VENDOR_ID_NVIDIA || device->vendor_id == VK_VENDOR_ID_AMD) && device->subgroup_arithmetic && device->subgroup_require_full_support;
     const char * ffn_rms_q8 = getenv("GGML_VK_FFN_RMS_Q8_1");
-    if (ffn_rms_q8 && std::atoi(ffn_rms_q8) != 0 && device->vendor_id == VK_VENDOR_ID_INTEL &&
+    if ((device->auto_ffn_rms_q8_1 || (ffn_rms_q8 && std::atoi(ffn_rms_q8) != 0)) && device->vendor_id == VK_VENDOR_ID_INTEL &&
         rms_subgroups && device->subgroup_clustered && device->integer_dot_product &&
         device->properties.limits.maxComputeSharedMemorySize >= 512 * sizeof(float)) {
         ggml_vk_create_pipeline2(device, device->pipeline_rms_norm_mul_q8_1_ffn, "rms_norm_mul_q8_1_ffn", rms_norm_mul_q8_1_ffn_len, rms_norm_mul_q8_1_ffn_data, "main", 4, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {0, 1, 0, 512}, 1, true, true);
@@ -3858,7 +3858,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         device->integer_dot_product && device->subgroup_size >= 8 && device->subgroup_size <= 32 &&
         device->properties.limits.maxComputeWorkGroupInvocations >= 512 &&
         device->properties.limits.maxComputeSharedMemorySize >= 512 * sizeof(float)) {
-        if (producer_enabled("GGML_VK_GLU_Q8_1")) {
+        if (device->auto_geglu_q8_1 || producer_enabled("GGML_VK_GLU_Q8_1")) {
             ggml_vk_create_pipeline2(device, device->pipeline_geglu_q8_1, "geglu_q8_1", geglu_q8_1_len, geglu_q8_1_data, "main", 3, sizeof(vk_producer_q8_1_push_constants), {128, 1, 1}, {}, 1, true, true);
         }
         if (producer_enabled("GGML_VK_ATTN_MUL_Q8_1")) {
@@ -4625,6 +4625,11 @@ static bool ggml_vk_external_memory_host_usable(vk::DriverId driver_id) {
 static bool ggml_vk_host_buffer_import_usable(uint32_t vendor_id) {
     // amdgpu re-faults all pages of every imported host allocation on each submission
     return vendor_id != VK_VENDOR_ID_AMD;
+}
+
+static bool ggml_vk_fixed_d3_ffn_device(const vk_device & device) {
+    return device->vendor_id == VK_VENDOR_ID_INTEL && device->properties.deviceID == 0x7d51 &&
+           strstr(device->properties.deviceName.data(), "140T") && !device->coopmat_support && !device->coopmat2;
 }
 
 vk_device ggml_vk_get_device(size_t idx) {
@@ -5514,6 +5519,9 @@ vk_device ggml_vk_get_device(size_t idx) {
         descriptor_set_layout_create_info.setPNext(&dslbfci);
         device->dsl = device->device.createDescriptorSetLayout(descriptor_set_layout_create_info);
 
+        const bool arc_140t = ggml_vk_fixed_d3_ffn_device(device);
+        device->auto_ffn_rms_q8_1 = arc_140t && getenv("GGML_VK_FFN_RMS_Q8_1") == nullptr;
+        device->auto_geglu_q8_1   = arc_140t && getenv("GGML_VK_GLU_Q8_1") == nullptr;
         ggml_vk_load_shaders(device);
 
         // Prefer a dedicated transfer queue on AMD dGPUs (non-GCN) when graphics queue use is disabled.
@@ -6104,6 +6112,12 @@ void ggml_vk_instance_init() {
     vk_instance.multi_device = host_buffer_import_count > 1 && vk_instance.device_host_buffer_import[0];
 }
 
+static void ggml_vk_set_ffn_q8_defaults(ggml_backend_vk_context * ctx, bool enable) {
+    const auto & device = ctx->device;
+    ctx->pipeline_rms_norm_mul_q8_1_ffn = (enable || !device->auto_ffn_rms_q8_1) ? device->pipeline_rms_norm_mul_q8_1_ffn : nullptr;
+    ctx->pipeline_geglu_q8_1 = (enable || !device->auto_geglu_q8_1) ? device->pipeline_geglu_q8_1 : nullptr;
+}
+
 void ggml_vk_init(ggml_backend_vk_context * ctx, size_t idx) {
     VK_LOG_DEBUG("ggml_vk_init(" << ctx->name << ", " << idx << ")");
     ggml_vk_instance_init();
@@ -6112,6 +6126,7 @@ void ggml_vk_init(ggml_backend_vk_context * ctx, size_t idx) {
     ctx->name = GGML_VK_NAME + std::to_string(idx);
 
     ctx->device = ggml_vk_get_device(idx);
+    ggml_vk_set_ffn_q8_defaults(ctx, false);
 
     ctx->semaphore_idx = 0;
     ctx->event_idx = 0;
@@ -11717,7 +11732,7 @@ static void ggml_vk_producer_q8_1(ggml_backend_vk_context * ctx, vk_context & su
             (uint32_t)a->ne[0], (uint32_t)a->ne[1],
         };
         vk_pipeline pipeline = ctx->fused_q8_producer == Q8_PRODUCER_GLU ?
-            ctx->device->pipeline_geglu_q8_1 : ctx->device->pipeline_attn_mul_q8_1;
+            ctx->pipeline_geglu_q8_1 : ctx->device->pipeline_attn_mul_q8_1;
         ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
             {ggml_vk_tensor_subbuffer(ctx, a), ggml_vk_tensor_subbuffer(ctx, b), d_q}, pc, {pc.ne, 1, 1});
@@ -11748,7 +11763,7 @@ static void ggml_vk_ffn_rms_q8_1(ggml_backend_vk_context * ctx, vk_context & sub
 
     vk_op_binary_push_constants pc = ggml_vk_rms_norm_push_constants(src, weight, mul, ggml_get_op_params_f32(rms, 0), 0);
     init_pushconst_tensor_offsets(ctx, pc, src, weight, nullptr, nullptr, mul);
-    vk_pipeline pipeline = ctx->device->pipeline_rms_norm_mul_q8_1_ffn;
+    vk_pipeline pipeline = ctx->pipeline_rms_norm_mul_q8_1_ffn;
     const vk_subbuffer d_q = {ctx->prealloc_y, 0, qsize};
     ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
@@ -14559,12 +14574,12 @@ static bool ggml_vk_producer_q8_matmul_ok(ggml_backend_vk_context * ctx, const g
 }
 
 static q8_producer_mode ggml_vk_can_fuse_producer_q8_1(ggml_backend_vk_context * ctx, const ggml_cgraph * cgraph, int node_idx) {
-    if (!ctx->device->pipeline_geglu_q8_1 && !ctx->device->pipeline_attn_mul_q8_1 &&
+    if (!ctx->pipeline_geglu_q8_1 && !ctx->device->pipeline_attn_mul_q8_1 &&
         !ctx->device->pipeline_rms_norm_mul_q8_1_attn && !ctx->device->pipeline_rms_norm_mul_q8_1_head) {
         return Q8_PRODUCER_NONE;
     }
     const ggml_tensor * root = cgraph->nodes[node_idx];
-    if (root->op == GGML_OP_GLU && ctx->device->pipeline_geglu_q8_1 &&
+    if (root->op == GGML_OP_GLU && ctx->pipeline_geglu_q8_1 &&
         ggml_can_fuse_subgraph(cgraph, node_idx, {GGML_OP_GLU, GGML_OP_MUL_MAT}, {node_idx + 1})) {
         const ggml_tensor * a = root->src[0];
         const ggml_tensor * b = root->src[1];
@@ -14638,7 +14653,7 @@ static q8_producer_mode ggml_vk_can_fuse_producer_q8_1(ggml_backend_vk_context *
 }
 
 static bool ggml_vk_can_fuse_ffn_rms_q8_1(ggml_backend_vk_context * ctx, const ggml_cgraph * cgraph, int node_idx) {
-    if (!ctx->device->pipeline_rms_norm_mul_q8_1_ffn ||
+    if (!ctx->pipeline_rms_norm_mul_q8_1_ffn ||
         !ggml_can_fuse_subgraph(cgraph, node_idx,
             {GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_MUL_MAT, GGML_OP_MUL_MAT},
             {node_idx + 2, node_idx + 3})) {
@@ -15956,7 +15971,7 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph, 
     std::vector<ggml_tensor *> new_order;
     std::vector<bool> used(graph->n_nodes, false);
     std::set<ggml_tensor *> used_node_set;
-    const bool producers_enabled = ctx->device->pipeline_geglu_q8_1 || ctx->device->pipeline_attn_mul_q8_1 ||
+    const bool producers_enabled = ctx->pipeline_geglu_q8_1 || ctx->device->pipeline_attn_mul_q8_1 ||
         ctx->device->pipeline_rms_norm_mul_q8_1_attn || ctx->device->pipeline_rms_norm_mul_q8_1_head;
 
     int first_unused = 0;
@@ -16021,7 +16036,7 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph, 
             if (!producers_enabled) {
                 return 0;
             }
-            if (ctx->device->pipeline_geglu_q8_1 &&
+            if (ctx->pipeline_geglu_q8_1 &&
                 match_pattern({GGML_OP_GLU, GGML_OP_MUL_MAT}, start) &&
                 ggml_get_glu_op(graph->nodes[start]) == GGML_GLU_OP_GEGLU &&
                 graph->nodes[start + 1]->src[1] == graph->nodes[start]) {
@@ -17474,11 +17489,24 @@ static ggml_backend_dev_t ggml_backend_vk_reg_get_device(ggml_backend_reg_t reg,
     return devices[device];
 }
 
+static void ggml_backend_vk_set_ffn_q8_defaults(ggml_backend_t backend, bool enable) {
+    auto * ctx = static_cast<ggml_backend_vk_context *>(backend->context);
+    ggml_vk_set_ffn_q8_defaults(ctx, enable);
+    if (enable && ggml_vk_fixed_d3_ffn_device(ctx->device)) {
+        GGML_LOG_INFO("ggml_vulkan: fixed D3 FFN fusions on %s: RMSNorm=%d GEGLU=%d\n",
+                      ctx->name.c_str(), int(bool(ctx->pipeline_rms_norm_mul_q8_1_ffn)), int(bool(ctx->pipeline_geglu_q8_1)));
+    }
+}
+
+static void * ggml_backend_vk_get_proc_address(ggml_backend_reg_t, const char * name) {
+    return strcmp(name, "ggml_backend_vk_set_ffn_q8_defaults") == 0 ? (void *) ggml_backend_vk_set_ffn_q8_defaults : nullptr;
+}
+
 static const struct ggml_backend_reg_i ggml_backend_vk_reg_i = {
     /* .get_name         = */ ggml_backend_vk_reg_get_name,
     /* .get_device_count = */ ggml_backend_vk_reg_get_device_count,
     /* .get_device       = */ ggml_backend_vk_reg_get_device,
-    /* .get_proc_address = */ NULL,
+    /* .get_proc_address = */ ggml_backend_vk_get_proc_address,
 };
 
 ggml_backend_reg_t ggml_backend_vk_reg() {

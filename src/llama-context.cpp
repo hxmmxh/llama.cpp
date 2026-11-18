@@ -1451,9 +1451,62 @@ bool llama_context::init_dspark_device(llama_context & target) {
     return true;
 }
 
+void llama_context::set_dspark_ffn_defaults(llama_context & target, bool enable) {
+    auto * draft_backend  = dspark_sampling.backend;
+    auto * target_backend = target.dspark_input_tokens.backend;
+    if (!draft_backend || !target_backend) {
+        return;
+    }
+    auto * device = ggml_backend_get_device(draft_backend);
+    auto * reg = ggml_backend_dev_backend_reg(device);
+    using set_defaults_fn = void (*)(ggml_backend_t, bool);
+    auto set_defaults = (set_defaults_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_vk_set_ffn_q8_defaults");
+    if (!set_defaults) {
+        return;
+    }
+
+    if (enable) {
+        const char * dense_q = std::getenv("LLAMA_DSPARK_DENSE_Q");
+        if (!dense_q || std::strcmp(dense_q, "1") != 0 || target.model.arch != LLM_ARCH_SPARK2_5 || target.model.type != LLM_TYPE_1_7B ||
+                target.model.ftype() != LLAMA_FTYPE_MOSTLY_Q4_K_M || model.arch != LLM_ARCH_DFLASH ||
+                model.ftype() != LLAMA_FTYPE_MOSTLY_Q8_0 || model.hparams.n_layer() != 5 ||
+                target.model.hparams.n_embd != 2048 || target.model.hparams.n_ff() != 6656 ||
+                model.hparams.n_embd != 2048 || model.hparams.n_ff() != 6656) {
+            return;
+        }
+        // Some Q4_1 conversions retain the Q4_K_M file type in GGUF.
+        for (const llama_model * m : { &target.model, &model }) {
+            if (m->dev_output() != device) {
+                return;
+            }
+            for (uint32_t i = 0; i < m->hparams.n_layer(); ++i) {
+                const auto & layer = m->layers[i];
+                if (m->dev_layer(i) != device || !layer.ffn_down || !layer.ffn_gate || !layer.ffn_up) {
+                    return;
+                }
+                const bool draft = m == &model;
+                const auto gate_type = draft ? GGML_TYPE_Q8_0 : GGML_TYPE_Q4_K;
+                if (layer.ffn_gate->type != gate_type || layer.ffn_up->type != gate_type ||
+                        (layer.ffn_down->type != gate_type && (draft || layer.ffn_down->type != GGML_TYPE_Q6_K))) {
+                    return;
+                }
+            }
+        }
+    }
+
+    set_defaults(target_backend, enable);
+    set_defaults(draft_backend,  enable);
+    target.sched_need_reserve = sched_need_reserve = true;
+}
+
+void llama_dspark_device_enable_fixed_d3_ffn(llama_context * target, llama_context * draft) {
+    draft->set_dspark_ffn_defaults(*target, true);
+}
+
 void llama_context::reset_dspark_device(llama_context & target) {
     synchronize();
     target.synchronize();
+    set_dspark_ffn_defaults(target, false);
     cparams.dspark_device_sampling = nullptr;
     cparams.dspark_device_features = nullptr;
     target.cparams.dspark_device_extract = false;

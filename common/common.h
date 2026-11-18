@@ -383,6 +383,8 @@ struct common_params_speculative {
     double synth_len = -1.0;
     std::vector<double> synth_rates;
 
+    bool adaptive = false; // Calibrate draft costs on each load and select depth online.
+
     // used by Simple, MTP, Eagle3, etc. - all methods that require some kind of draft model
     common_params_speculative_draft draft;
 
@@ -600,6 +602,7 @@ struct common_params {
 
     ggml_type cache_type_k_swa = GGML_TYPE_COUNT;
     ggml_type cache_type_v_swa = GGML_TYPE_COUNT;
+    uint32_t kv_tail_tokens = 0;
 
     size_t moe_cache_size = 0; // GPU cache size in bytes for the MoE experts kept in the CPU, split among the GPUs like the layers
 

@@ -94,6 +94,7 @@ struct llama_context {
     float * get_embeddings_layer_inp(uint32_t lid);
 
     bool init_dspark_device(llama_context & target);
+    void set_dspark_ffn_defaults(llama_context & target, bool enable);
     void reset_dspark_device(llama_context & target);
     void set_dspark_device_features(llama_context & target, size_t row_offset, size_t n_rows);
     void set_dspark_device_sampling(const float * uniforms, size_t count, float temperature);

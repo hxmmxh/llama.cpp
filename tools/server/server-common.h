@@ -41,6 +41,8 @@ using json = common_json;
 
 using raw_buffer = std::vector<uint8_t>;
 
+bool server_use_fixed_d3_ffn_defaults(const common_params & params);
+
 template <typename T>
 static T json_value(const json & body, const std::string & key, const T & default_value) {
     // Fallback null to default value

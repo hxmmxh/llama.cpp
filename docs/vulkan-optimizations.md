@@ -19,9 +19,13 @@ RMSNorm/scale/residual fusion, GELU-times-up, RoPE and KV writes already accept 
 
 ## Producer activation quantization
 
-The optional [FFN RMSNorm fusion](vulkan-ffn-rms-q8.md) writes Q8_1 activations directly for gate/up. Additional [producer fusions](vulkan-producer-q8.md) cover GEGLU before down, attention gate multiplication before Wo, attention RMSNorm before QKV, and final RMSNorm before the LM head. Each has a separate switch and is disabled by default.
+The optional [FFN RMSNorm fusion](vulkan-ffn-rms-q8.md) writes Q8_1 activations directly for gate/up. Additional [producer fusions](vulkan-producer-q8.md) cover GEGLU before down, attention gate multiplication before Wo, attention RMSNorm before QKV, and final RMSNorm before the LM head. Each has a separate switch.
 
-These paths retain existing matrix kernels and precision choices. Attention RMSNorm also writes FP32 for the BF16 gate projection; final RMSNorm preserves the embedding path when requested. Measurements use independent graphs and do not establish whole-model throughput gains.
+The server enables the two FFN fusions by default on Intel Arc 140T with the measured Spark 1.7B Q4_K_M target and Q8_0 backbone draft. This profile uses fixed probabilistic D3, a single slot, F16 KV, Flash Attention, disabled cooperative matrices, and device DSpark with dense Q and asynchronous handoff. Other configurations retain opt-in behavior. Set either `GGML_VK_FFN_RMS_Q8_1=0` or `GGML_VK_GLU_Q8_1=0` before startup to disable that fusion independently. The [paired gen.txt and test-c measurements](../../../reports/igpu-benchmark/20261118-140430-d3-ffn-fusion/README.md) found 3.16% and 3.44% higher decode throughput with both enabled. [Windows runtime checks](../../experiments/windows-cpu/windows_core_ultra_7_255h/20261118-164801-ffn-defaults/verification.json) cover default selection, independent overrides, D1, Q8_0 K cache and the mixed Q4_1 target.
+
+The attention gate, QKV norm and LM-head norm fusions remain opt-in. The [64-request whole-model comparison](../../../reports/igpu-benchmark/20261118-173500-d3-producer-q8/README.md) tested all eight combinations on top of the two FFN fusions. Every additional combination reduced decode throughput on at least one of gen.txt and test-c, with identical paired output tokens and draft counts.
+
+These paths retain existing matrix kernels and precision choices. Attention RMSNorm also writes FP32 for the BF16 gate projection, and final RMSNorm preserves the embedding path when requested.
 
 ## DSpark buffers and scheduling
 
