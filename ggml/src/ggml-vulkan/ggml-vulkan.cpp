@@ -1,5 +1,6 @@
 #include "ggml-vulkan-common.h"
 #include "ggml-vulkan-trace.h"
+#include "ggml-vulkan-vplane.h"
 
 // Measured M=4 linear projections: X[4,K] * W[N,K]^T on Intel Arc 140T.
 // See docs/vulkan-s17-m4-configs.md. BF16 retains the generic backend choices.
@@ -2652,6 +2653,12 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 spv_size = flash_attn_f32_f16_fp32_len;
             }
             name = aligned ? "flash_attn_f32_f16_aligned" : "flash_attn_f32_f16";
+        }
+        if (fa.first.flags & GGML_VK_FA_VPLANE) {
+            const bool q4 = (fa.first.flags & GGML_VK_FA_VPLANE_Q4) != 0;
+            const bool integer = (fa.first.flags & GGML_VK_FA_VPLANE_INTEGER) != 0;
+            name = q4 ? (integer ? "flash_attn_vplane_q4_integer" : "flash_attn_vplane_q4_f16") :
+                        (integer ? "flash_attn_vplane_q8_integer" : "flash_attn_vplane_q8_f16");
         }
         ggml_vk_create_pipeline(device, fa.second, name, spv_size, spv_data, "main", 8,
                                 sizeof(vk_flash_attn_push_constants), {Br, 1, 1},
@@ -8804,7 +8811,70 @@ bool ggml_vk_flash_attn_coopmat_shmem_support(const vk_device& device, const vk_
     return supported;
 }
 
+static bool ggml_vk_vplane_supported(const vk_device & device, const ggml_tensor * op) {
+    const int bits = op->op_params[6];
+    if (op->op_params[5] != GGML_VK_VPLANE_TAG ||
+        !ggml_vk_vplane_inputs(op->src[0], op->src[1], op->src[2], op->src[3], bits) ||
+        op->src[4] || op->type != GGML_TYPE_F32 ||
+        op->ne[0] != 256 || op->ne[1] != 8 || op->ne[2] != op->src[0]->ne[1] || op->ne[3] != 1 ||
+        !ggml_is_contiguous(op) ||
+        ggml_prec_get_acc(op) != GGML_PREC_F32 || ggml_get_op_params_i32(op, 4) != 0 ||
+        !std::isfinite(ggml_get_op_params_f32(op, 0)) ||
+        ggml_get_op_params_f32(op, 1) != 0.0f || ggml_get_op_params_f32(op, 2) != 0.0f) {
+        return false;
+    }
+    const auto config = ggml_vk_vplane_tuning(op->src[1]->ne[1], op->src[0]->ne[1], bits);
+    if (op->op_params[7] != int32_t(config.groups) || op->op_params[8] != int32_t(config.integer) ||
+        device->vendor_id != VK_VENDOR_ID_INTEL || device->properties.deviceID != 0x7d51 ||
+        !device->uma || !device->fp16 || !device->subgroup_shuffle || !device->subgroup_vote ||
+        device->coopmat2 || device->coopmat1_fa_support ||
+        !ggml_vk_fa_scalar_uses_mmq(device, op->src[1]->type, bits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0)) {
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        const auto * t = op->src[i];
+        if (t && (t->view_offs != 0 || ggml_nbytes(t) > device->properties.limits.maxStorageBufferRange)) {
+            return false;
+        }
+    }
+    auto tuning = get_fa_tuning_params(device, 256, 256, 4, op->src[1]->ne[1], op->src[1]->type,
+                                     bits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0, true);
+    tuning.row_split = config.row_split;
+    tuning.workgroup_size = config.workgroup_size;
+    return tuning.path == FA_SCALAR && !tuning.shmem_staging && tuning.disable_subgroups &&
+        tuning.block_rows == 4 && tuning.block_cols == 32 && tuning.d_split == 8 &&
+        ggml_vk_flash_attn_scalar_shmem_support(device, tuning, 256, 256, true, op->src[1]->type,
+                                               bits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0);
+}
+
+static void ggml_vk_flash_attn_impl(ggml_backend_vk_context * ctx, vk_context & subctx,
+    const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v, const ggml_tensor * mask,
+    const ggml_tensor * sinks, ggml_tensor * dst, bool vplane);
+
 void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v, const ggml_tensor * mask, const ggml_tensor * sinks, ggml_tensor * dst) {
+    const bool vplane = dst->op_params[5] == GGML_VK_VPLANE_TAG;
+    ggml_tensor logical_v;
+    if (vplane) {
+        GGML_ASSERT(ggml_vk_vplane_supported(ctx->device, dst));
+        logical_v = *v;
+        logical_v.type = dst->op_params[6] == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0;
+        logical_v.ne[0] = 256;
+        logical_v.ne[1] = k->ne[1];
+        logical_v.ne[2] = 2;
+        logical_v.ne[3] = 1;
+        logical_v.nb[0] = ggml_type_size(logical_v.type);
+        logical_v.nb[1] = ggml_row_size(logical_v.type, 256);
+        logical_v.nb[2] = ggml_nbytes(v) / 2;
+        logical_v.nb[3] = ggml_nbytes(v);
+        GGML_ASSERT(ggml_nbytes(&logical_v) == ggml_nbytes(v));
+        v = &logical_v;
+    }
+    ggml_vk_flash_attn_impl(ctx, subctx, q, k, v, mask, sinks, dst, vplane);
+}
+
+static void ggml_vk_flash_attn_impl(ggml_backend_vk_context * ctx, vk_context & subctx,
+    const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v, const ggml_tensor * mask,
+    const ggml_tensor * sinks, ggml_tensor * dst, bool vplane) {
     VK_LOG_DEBUG("ggml_vk_flash_attn((" << q << ", name=" << q->name << ", type=" << q->type << ", ne0=" << q->ne[0] << ", ne1=" << q->ne[1] << ", ne2=" << q->ne[2] << ", ne3=" << q->ne[3] << ", nb0=" << q->nb[0] << ", nb1=" << q->nb[1] << ", nb2=" << q->nb[2] << ", nb3=" << q->nb[3];
     std::cerr << "), (" << k << ", name=" << k->name << ", type=" << k->type << ", ne0=" << k->ne[0] << ", ne1=" << k->ne[1] << ", ne2=" << k->ne[2] << ", ne3=" << k->ne[3] << ", nb0=" << k->nb[0] << ", nb1=" << k->nb[1] << ", nb2=" << k->nb[2] << ", nb3=" << k->nb[3];
     std::cerr << "), (" << v << ", name=" << v->name << ", type=" << v->type << ", ne0=" << v->ne[0] << ", ne1=" << v->ne[1] << ", ne2=" << v->ne[2] << ", ne3=" << v->ne[3] << ", nb0=" << v->nb[0] << ", nb1=" << v->nb[1] << ", nb2=" << v->nb[2] << ", nb3=" << v->nb[3];
@@ -8967,6 +9037,11 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
         nbv2_eff = (uint32_t)((uint64_t)HSV * KV * sizeof(ggml_fp16_t));
         nbv3_eff = (uint32_t)((uint64_t)HSV * KV * nev2 * sizeof(ggml_fp16_t));
     }
+    if (vplane) {
+        const auto config = ggml_vk_vplane_tuning(KV, neq1, dst->op_params[6]);
+        tuning_params.row_split = config.row_split;
+        tuning_params.workgroup_size = config.workgroup_size;
+    }
     const uint32_t alignment = tuning_params.block_cols;
     bool aligned = (KV % alignment) == 0 &&
                    // the "aligned" shader variant will forcibly align strides, for performance
@@ -8982,6 +9057,11 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
                         && (ctx->device->architecture != vk_device_architecture::AMD_GCN || HSK > 256 || HSV > 256);
     vk_fa_pipeline_state fa_pipeline_state = get_fa_pipeline_state(ctx->device, tuning_params, HSK, HSV, aligned, f32acc,
                                                                    mask != nullptr, use_mask_opt, logit_softcap != 0, use_sparse, k_type_eff, v_type_eff);
+    if (vplane) {
+        fa_pipeline_state.flags |= GGML_VK_FA_VPLANE;
+        if (dst->op_params[6] == 4) { fa_pipeline_state.flags |= GGML_VK_FA_VPLANE_Q4; }
+        if (dst->op_params[8]) { fa_pipeline_state.flags |= GGML_VK_FA_VPLANE_INTEGER; }
+    }
 
     vk_pipeline pipeline = nullptr;
 
@@ -9049,6 +9129,9 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
         }
     }
 
+    if (vplane) {
+        split_k = ggml_vk_vplane_tuning(KV, neq1, dst->op_params[6]).splits;
+    }
     if (!use_sparse && split_k > 1) {
         // Try to evenly split KV into split_k chunks, but it needs to be a multiple
         // of "align", so recompute split_k based on that.
@@ -16704,6 +16787,9 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             }
         case GGML_OP_FLASH_ATTN_EXT:
             {
+                if (op->op_params[5] == GGML_VK_VPLANE_TAG) {
+                    return ggml_vk_vplane_supported(device, op);
+                }
                 bool coopmat2 = device->coopmat2;
                 uint32_t HSK = op->src[1]->ne[0];
                 uint32_t HSV = op->src[2]->ne[0];

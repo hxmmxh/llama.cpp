@@ -78,6 +78,30 @@ shared vec4 occupancy_limiter[LIMIT_OCCUPANCY_SHMEM > 0 ? LIMIT_OCCUPANCY_SHMEM 
 #include "flash_attn_mmq_funcs.glsl"
 #endif
 
+#ifdef MMQ
+const bool PV_PLANE = (Flags & 128u) != 0;
+const bool PV_PLANE_INTEGER = (Flags & 256u) != 0;
+const bool PV_PLANE_Q4 = (Flags & 512u) != 0;
+layout (binding = 2) readonly buffer VTIME64 {uvec2 data_vtime64[];};
+layout (binding = 2) readonly buffer VTIME128 {uvec4 data_vtime128[];};
+layout (binding = 2) readonly buffer VTIMEHV4 {f16vec4 data_vtime_hv4[];};
+// Four channels, each holding four or eight time-ordered nibbles.
+uvec4 vplane_q4_load(uint chunk_byte, uint quad, uint column) {
+    if (cols_per_thread == 8) {
+        return data_vtime128[(chunk_byte + 512) / 16 + column * 64 + quad];
+    }
+    uvec2 packed = data_vtime64[(chunk_byte + 512) / 8 + column * 64 + quad];
+    return uvec4(packed.x & 65535u, packed.x >> 16, packed.y & 65535u, packed.y >> 16);
+}
+uvec4 q4_nibbles_to_i8(uvec4 packed) {
+    uvec4 spread = (packed & uvec4(15)) | ((packed & uvec4(240)) << 4) |
+        ((packed & uvec4(3840)) << 8) | ((packed & uvec4(61440)) << 12);
+    // Each byte is in [0,15], so adding 120 cannot carry into its neighbor.
+    return (spread + uvec4(0x78787878u)) ^ uvec4(0x80808080u);
+}
+
+#endif
+
 void main() {
 #ifdef NEEDS_INIT_IQ_SHMEM
     if (fa_type_needs_shmem(FaTypeK) || fa_type_needs_shmem(FaTypeV)) {
@@ -511,33 +535,121 @@ void main() {
             barrier();
         }
 
-        [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
-            uint32_t vcol;
-            bool kv_active = fa_kv_index(j * Bc + c * cols_per_iter + col_tid, vcol);
-            if (!kv_active) {
-                continue;
-            }
-
-            FLOAT_TYPE Pf[rows_per_thread];
-            [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
-                Pf[r] = FLOAT_TYPE(exp(float(Sf[r][c]) - Mf[r]));
-                Lf[r] += Pf[r];
-            }
-
-            [[unroll]] for (uint32_t d = 0; d < HSV_per_thread / 4; ++d) {
-                FLOAT_TYPEV4 Vf;
-                if (SHMEM_STAGING != 0) {
-                    Vf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
-                } else if (USE_DECODE_V) {
-                    uint coord = vcol * v_stride * BLOCK_SIZE_V + 4 * (d * D_split + d_tid);
-                    uint ib = coord / BLOCK_SIZE_V;
-                    uint iqs = (coord % BLOCK_SIZE_V);
-                    Vf = dequantize4(ib, iqs, v_offset, BINDING_IDX_V);
-                } else {
-                    Vf = FLOAT_TYPEV4(data_vv4[v_offset / 4 + vcol * v_stride / 4 + d * D_split + d_tid]);
+#ifdef MMQ
+        if (PV_PLANE && !PV_PLANE_INTEGER) {
+            const uint pv_words = cols_per_thread / 4;
+            FLOAT_TYPE probabilities[rows_per_thread][cols_per_thread];
+            [[unroll]] for (uint r = 0; r < rows_per_thread; ++r) {
+                [[unroll]] for (uint c = 0; c < cols_per_thread; ++c) {
+                    probabilities[r][c] = FLOAT_TYPE(exp(float(Sf[r][c]) - Mf[r]));
+                    Lf[r] += float(probabilities[r][c]);
                 }
+            }
+            uint chunk_byte = (v_offset + j * HSV) * (PV_PLANE_Q4 ? 18 : 34);
+            [[unroll]] for (uint d = 0; d < HSV_per_thread / 4; ++d) {
+                uint quad = d * D_split + d_tid;
+                FLOAT_TYPEV4 scales = FLOAT_TYPEV4(data_vtime_hv4[chunk_byte / 8 + quad]);
+                uint codes = (chunk_byte + 512) / 16 + (col_tid * 64 + quad) * pv_words;
+                uvec4 raw0, raw1 = uvec4(0);
+                if (PV_PLANE_Q4) { raw0 = vplane_q4_load(chunk_byte, quad, col_tid); }
+                else {
+                    raw0 = data_vtime128[codes];
+                    if (pv_words == 2) { raw1 = data_vtime128[codes+1]; }
+                }
+                [[unroll]] for (uint c = 0; c < cols_per_thread; ++c) {
+                    uvec4 packed = c < 4 ? raw0 : raw1;
+                    FLOAT_TYPEV4 integers;
+                    if (PV_PLANE_Q4) {
+                        integers = FLOAT_TYPEV4((raw0 >> (4u*c)) & uvec4(15)) - FLOAT_TYPEV4(8);
+                    } else {
+                        integers = FLOAT_TYPEV4(bitfieldExtract(ivec4(packed), int(8u*(c&3u)), 8));
+                    }
+                    // Round decoded V to the same FP16 value as a materialized F16 cache.
+                    precise FLOAT_TYPEV4 values = integers * scales;
+                    [[unroll]] for (uint r = 0; r < rows_per_thread; ++r) {
+                        Of[r][d] += FLOAT_TYPEV4(probabilities[r][c] * values);
+                    }
+                }
+            }
+        } else if (PV_PLANE) {
+            const uint pv_words = cols_per_thread / 4;
+            uint packed_p[rows_per_thread][2];
+            float p_scale[rows_per_thread];
+            bool any_probability = false;
+            [[unroll]] for (uint r = 0; r < rows_per_thread; ++r) {
+                float maximum = 0;
+                [[unroll]] for (uint c = 0; c < cols_per_thread; ++c) {
+                    // Reuse dead score registers. Half exp values match the fast QK path.
+                    Sf[r][c] = ACC_TYPE(FLOAT_TYPE(exp(float(Sf[r][c]) - Mf[r])));
+                    Lf[r] += float(Sf[r][c]); maximum = max(maximum, float(Sf[r][c]));
+                }
+                p_scale[r] = maximum / 255.0f;
+                any_probability = any_probability || maximum > 0;
+                if (PV_PLANE_INTEGER) {
+                    [[unroll]] for (uint g = 0; g < pv_words; ++g) {
+                        vec4 q = maximum > 0 ? roundEven(clamp(vec4(Sf[r][g*4], Sf[r][g*4+1], Sf[r][g*4+2], Sf[r][g*4+3]) / maximum * 255.0f, 0.0f, 255.0f)) : vec4(0);
+                        packed_p[r][g] = pack32(u8vec4(q));
+                    }
+                }
+            }
+            if (any_probability) {
+                uint chunk_byte = (v_offset + j * HSV) * (PV_PLANE_Q4 ? 18 : 34);
+                [[unroll]] for (uint d = 0; d < HSV_per_thread / 4; ++d) {
+                    uint quad = d * D_split + d_tid;
+                    uvec2 sh = data_vtime64[chunk_byte / 8 + quad];
+                    vec4 scale_v = vec4(unpackHalf2x16(sh.x), unpackHalf2x16(sh.y));
+                    uint codes = (chunk_byte + 512) / 16 + (col_tid * 64 + quad) * pv_words;
+                    uvec4 v0, v1 = uvec4(0);
+                    if (PV_PLANE_Q4) {
+                        uvec4 packed4 = vplane_q4_load(chunk_byte, quad, col_tid);
+                        v0 = q4_nibbles_to_i8(packed4);
+                        if (pv_words == 2) { v1 = q4_nibbles_to_i8(packed4 >> 16); }
+                    } else {
+                        v0 = data_vtime128[codes];
+                        if (pv_words == 2) { v1 = data_vtime128[codes+1]; }
+                    }
+                    [[unroll]] for (uint r = 0; r < rows_per_thread; ++r) {
+                        [[unroll]] for (uint lane = 0; lane < 4; ++lane) {
+                            if (PV_PLANE_INTEGER) {
+                                int acc = dotPacked4x8EXT(packed_p[r][0], int(v0[lane]));
+                                if (pv_words == 2) { acc += dotPacked4x8EXT(packed_p[r][1], int(v1[lane])); }
+                                Of[r][d][lane] += FLOAT_TYPE(float(acc) * p_scale[r] * scale_v[lane]);
+                            }
+                        }
+                    }
+                }
+            }
+        } else
+#endif
+        {
+            [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+                uint32_t vcol;
+                bool kv_active = fa_kv_index(j * Bc + c * cols_per_iter + col_tid, vcol);
+                if (!kv_active) {
+                    continue;
+                }
+
+                FLOAT_TYPE Pf[rows_per_thread];
                 [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
-                    Of[r][d] += FLOAT_TYPEV4(Pf[r] * Vf);
+                    Pf[r] = FLOAT_TYPE(exp(float(Sf[r][c]) - Mf[r]));
+                    Lf[r] += Pf[r];
+                }
+
+                [[unroll]] for (uint32_t d = 0; d < HSV_per_thread / 4; ++d) {
+                    FLOAT_TYPEV4 Vf;
+                    if (SHMEM_STAGING != 0) {
+                        Vf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
+                    } else if (USE_DECODE_V) {
+                        uint coord = vcol * v_stride * BLOCK_SIZE_V + 4 * (d * D_split + d_tid);
+                        uint ib = coord / BLOCK_SIZE_V;
+                        uint iqs = (coord % BLOCK_SIZE_V);
+                        Vf = dequantize4(ib, iqs, v_offset, BINDING_IDX_V);
+                    } else {
+                        Vf = FLOAT_TYPEV4(data_vv4[v_offset / 4 + vcol * v_stride / 4 + d * D_split + d_tid]);
+                    }
+                    [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+                        Of[r][d] += FLOAT_TYPEV4(Pf[r] * Vf);
+                    }
                 }
             }
         }

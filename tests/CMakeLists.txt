@@ -410,3 +410,7 @@ if (TARGET gguf-model-data)
 endif()
 
 llama_build_and_test(test-dspark-device.cpp LABEL "main behavior")
+
+# Packed Vulkan KV uses a backend-specific input contract and an FP64 reference.
+llama_build(test-vulkan-vplane.cpp LINK ggml)
+llama_test(test-vulkan-vplane ARGS --contract)
