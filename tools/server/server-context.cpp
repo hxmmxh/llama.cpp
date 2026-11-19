@@ -6,6 +6,7 @@
 #include "server-chat.h"
 #include "server-common.h"
 #include "server-decision.h"
+#include "server-adaptive-draft.h"
 #include "server-http.h"
 #include "server-task.h"
 #include "server-queue.h"
@@ -303,6 +304,7 @@ struct server_slot {
     common_prompt_checkpoint spec_ckpt;
     bool spec_is_replay = false;
     std::mt19937 spec_synth_rng;
+    std::unique_ptr<server_adaptive_draft> adaptive_draft;
 
     // TODO: move members that belong to the task (such as `generated`, `has_new_line`) to task_results_state
     //       see https://github.com/ggml-org/llama.cpp/pull/18283#issuecomment-3710175837
@@ -422,6 +424,7 @@ struct server_slot {
         SLT_DBG(*this, "%s", "\n");
 
         spec_is_replay = false;
+        adaptive_draft.reset();
 
         last_nl_pos    = 0;
         generated      = {};
@@ -645,6 +648,16 @@ struct server_slot {
         prompt.tokens.insert(spec_draft);
     }
 
+    void observe_adaptive_round(int draft, int accepted, int committed, bool terminal) {
+        if (adaptive_draft && adaptive_draft->observe(draft, accepted, committed, terminal)) {
+            llama_synchronize(ctx_tgt);
+            llama_synchronize(ctx_dft);
+            adaptive_draft->drain(ggml_time_us(), terminal);
+            stats.update_gen_last();
+            SLT_INF(*this, "adaptive draft: %s\n", adaptive_draft->status().dump().c_str());
+        }
+    }
+
     void synchronize_draft_at_end() {
         const char * async_env = std::getenv("LLAMA_DSPARK_ASYNC");
         if (ctx_dft && async_env && std::strcmp(async_env, "1") == 0) {
@@ -656,6 +669,14 @@ struct server_slot {
     void release() {
         if (is_processing()) {
             common_speculative_draft_finish(spec);
+            if (adaptive_draft) {
+                llama_synchronize(ctx_tgt);
+                llama_synchronize(ctx_dft);
+                adaptive_draft->abandon(ggml_time_us());
+                if (common_speculative_reset_active(spec)) {
+                    prompt_clear();
+                }
+            }
             GGML_ASSERT(task);
 
             SLT_INF(*this, "stop processing: n_tokens = %d, truncated = %d\n", prompt.n_tokens(), truncated);
@@ -1089,6 +1110,7 @@ private:
     common_context_seq_rm_type ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
 
     common_speculative_ptr spec;
+    std::unique_ptr<server_adaptive_draft_costs> adaptive_cost_data;
 
     bool add_bos_token = true;
 
@@ -1206,6 +1228,15 @@ private:
         const bool is_resume = sleeping;
 
         params_base = params;
+        adaptive_cost_data.reset();
+        if (params_base.speculative.adaptive) {
+            try {
+                server_adaptive_draft::validate(params_base);
+            } catch (const std::exception & e) {
+                SRV_ERR("adaptive draft configuration: %s\n", e.what());
+                return false;
+            }
+        }
         const auto output_limits = server_output_limits(params_base);
         params_base.n_outputs_max = output_limits.total;
         params_base.n_outputs_max_per_seq = output_limits.per_seq;
@@ -1476,6 +1507,21 @@ private:
             SRV_TRC("%s", "speculative decoding will use checkpoints\n");
         }
 
+        if (params_base.speculative.adaptive) {
+            try {
+                if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART ||
+                        !ctx_dft || common_context_can_seq_rm(ctx_dft) != COMMON_CONTEXT_SEQ_RM_TYPE_PART) {
+                    throw std::invalid_argument("adaptive D0 resume requires target and draft with partial sequence removal");
+                }
+                adaptive_cost_data = std::make_unique<server_adaptive_draft_costs>(
+                        server_adaptive_draft::calibrate(params_base, ctx_tgt, ctx_dft));
+                server_adaptive_draft validate(*adaptive_cost_data, params_base);
+            } catch (const std::exception & e) {
+                SRV_ERR("adaptive draft startup calibration: %s\n", e.what());
+                return false;
+            }
+        }
+
         // setup slots
         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
                 params_base.n_parallel, n_ctx_slot(), params_base.kv_unified ? "true" : "false");
@@ -1515,6 +1561,20 @@ private:
         if (!spec && params_base.speculative.has_synth()) {
             SRV_ERR("%s", "synthetic acceptance requires an initialized speculative decoding context\n");
             return false;
+        }
+
+        if (adaptive_cost_data) {
+            char anchor[16] = {};
+            const bool bonus_anchor = model_dft && llama_model_meta_val_str(model_dft, "dflash.sample_from_anchor", anchor, sizeof(anchor)) >= 0 && std::string(anchor) != "true";
+            if (!spec || !ctx_dft || bonus_anchor || common_speculative_n_max(spec.get()) != params_base.speculative.draft.n_max ||
+                    ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART || ctx_dft_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART ||
+                    llama_n_ubatch(ctx_tgt) < (uint32_t) params_base.speculative.draft.n_max + 1 ||
+                    llama_n_ubatch(ctx_dft) < (uint32_t) params_base.speculative.draft.n_max) {
+                SRV_ERR("%s", "adaptive draft requires anchor-first DSpark with the configured block capacity and partial rollback on both contexts\n");
+                return false;
+            }
+            SRV_INF("adaptive draft enabled: D0-D%d, initial D%d, drained fixed-depth timing windows\n",
+                    params_base.speculative.draft.n_max, std::min(3, params_base.speculative.draft.n_max));
         }
 
         for (int i = 0; i < params_base.n_parallel; i++) {
@@ -2067,6 +2127,17 @@ private:
             }
         } else {
             slot.smpl.reset();
+        }
+
+        if (adaptive_cost_data) {
+            try {
+                auto request_params = params_base;
+                request_params.sampling = task.params.sampling;
+                slot.adaptive_draft = std::make_unique<server_adaptive_draft>(*adaptive_cost_data, request_params);
+            } catch (const std::exception & e) {
+                send_error(task, std::string("Adaptive draft request: ") + e.what(), ERROR_TYPE_INVALID_REQUEST);
+                return false;
+            }
         }
 
         // the per-request limit takes priority over the global one
@@ -3700,6 +3771,11 @@ private:
                     return;
                 }
 
+                if (slot.adaptive_draft && !common_speculative_is_active(spec.get())) {
+                    common_speculative_invalidate_resume(spec.get());
+                    slot.adaptive_draft->stay_ordinary();
+                }
+
                 // Shift context
                 int n_keep = slot.task->params.n_keep < 0 ? slot.task->n_tokens() : slot.task->params.n_keep;
 
@@ -3774,7 +3850,27 @@ private:
                 const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                 const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 
-                const int n_draft_max = slot.get_n_draft_max();
+                int n_draft_max = slot.get_n_draft_max();
+
+                if (slot.adaptive_draft && slot.spec_draft.empty()) {
+                    n_draft_max = slot.adaptive_draft->begin(n_draft_max, ggml_time_us(), std::max(1, n_draft_max + 1));
+                    const bool transition = slot.adaptive_draft->needs_mode_transition(common_speculative_is_active(spec.get()));
+                    bool ready = true;
+                    if (transition) {
+                        const int64_t transition_start = ggml_time_us();
+                        queue_tasks.yield_to_queue([&]() {
+                            ready = common_speculative_set_active(spec.get(), n_draft_max > 0,
+                                    slot.id, slot.prompt.tokens.pos_next());
+                        });
+                        slot.adaptive_draft->account_transition(ggml_time_us() - transition_start);
+                    }
+                    if (!ready) {
+                        send_error(slot, "failed to restore DSpark context after ordinary decoding", ERROR_TYPE_SERVER);
+                        slot.release();
+                        generating.pop_back();
+                        return;
+                    }
+                }
 
                 if (n_draft_max > 0) {
                     GGML_ASSERT(slot.can_speculate());
@@ -3790,7 +3886,6 @@ private:
                         }
                     } else {
                         GGML_ASSERT(slot.spec_i_batch.empty());
-
                         slot.spec_ckpt.update_pos(
                                 slot.prompt.n_tokens(),
                                 llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
@@ -3817,6 +3912,7 @@ private:
                             /* .result_q_dense = */ spec_reject ? &slot.spec_draft_q_dense : nullptr,
                             /* .allow_async = */ ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART &&
                                                 ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_PART,
+                            /* .actual_draft_length = */ slot.adaptive_draft != nullptr,
                         };
 
                         drafting.push_back(&slot);
@@ -4822,7 +4918,11 @@ private:
                 populate_token_probs(slot, result, slot.task->params.post_sampling_probs, params_base.special, tok_idx);
             }
 
-            if (!process_token(result, slot)) {
+            const bool keep_generating = process_token(result, slot);
+            if (slot.adaptive_draft && slot.adaptive_draft->ordinary_pending()) {
+                slot.observe_adaptive_round(0, 0, 1, !keep_generating);
+            }
+            if (!keep_generating) {
                 // release slot because of stop condition
                 slot.synchronize_draft_at_end();
                 slot.print_timings();
@@ -4978,6 +5078,7 @@ private:
                 slot.stats.n_gen += 1;
 
                 if (!process_token(result, slot)) {
+                    slot.observe_adaptive_round((int) n_draft, (int) n_accepted, (int) i + 1, true);
                     slot.synchronize_draft_at_end();
                     slot.print_timings();
                     send_final_response(slot);
@@ -4987,6 +5088,7 @@ private:
                 }
             }
 
+            slot.observe_adaptive_round((int) n_draft, (int) n_accepted, (int) ids.size(), false);
             slot.print_timings_tg();
 
             SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) n_accepted, (int) n_draft, slot.prompt.n_tokens());

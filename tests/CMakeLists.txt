@@ -247,6 +247,8 @@ set_tests_properties(test-generate-models PROPERTIES
 )
 
 llama_build_and_test(test-speculative-dspark.cpp LABEL behavior)
+llama_build_and_test(test-speculative-adaptive.cpp LABEL behavior LINK llama-speculative-adaptive)
+llama_build(test-speculative-ordinary.cpp)
 
 # Target model for test-speculative-rejection-sampling
 set(SPEC_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-speculative-models/target")

@@ -64,6 +64,8 @@ LLAMA_API const float * llama_dspark_device_get_probs(llama_context * draft, int
 // Bind the next verification batch to device tokens; collect before reusing the draft graph.
 LLAMA_API void llama_dspark_device_set_target_tokens(llama_context * target, llama_context * draft, llama_pos pos0, size_t count);
 LLAMA_API void llama_dspark_device_clear_target_tokens(llama_context * target);
+// Pause graph hooks without freeing the resident embedding cache or draft device state.
+LLAMA_API void llama_dspark_device_set_target_active(llama_context * target, bool active);
 
 // Descriptor for constructing a mock model for quantization testing.
 struct llama_quant_model_desc {

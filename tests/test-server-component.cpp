@@ -2,7 +2,9 @@
 
 #include "../tools/server/server-common.h"
 #include "../tools/server/server-decision.h"
+#include "../tools/server/server-adaptive-draft.h"
 #include "../tools/server/server-schema.h"
+#include "speculative.h"
 
 #include <cstdlib>
 #include <regex>
@@ -355,7 +357,7 @@ static void test_server_pipe(testing & t) {
         server_pipe<int> p;
         std::thread producer([&]() {
             for (int i = 0; i < n; i++) {
-                p.write(int(i));
+                p.write(std::move(i));
             }
             p.close_write();
         });
@@ -553,6 +555,660 @@ static void test_glob_match(testing & t) {
     });
 }
 
+static void test_adaptive_draft(testing & t) {
+    common_params params;
+    params.n_parallel = 1;
+    params.speculative.types = {COMMON_SPECULATIVE_TYPE_NONE, COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK};
+    params.speculative.draft.probabilistic = true;
+    params.speculative.draft.n_max = 4;
+    server_adaptive_draft_costs data;
+    data.history_tokens = 512;
+    data.temperature = params.sampling.temp;
+    data.top_p = params.sampling.top_p;
+    data.top_k = params.sampling.top_k;
+    data.min_p = params.sampling.min_p;
+    for (int d = 1; d <= 4; ++d) {
+        data.rows.push_back({d, 3, 1000.0, 0.0});
+    }
+    data.rows.push_back({0, 3, 100000.0, 0.0});
+    t.test("robust startup cost rejects isolated outliers", [](testing & t) {
+        for (int draft = 0; draft <= 7; ++draft) {
+            const auto cost = server_adaptive_draft::summarize_cost(draft, {99, 100, 101, 100, 99, 101, 9000});
+            t.assert_equal("robust center", 100.0, cost.mean_us);
+            t.assert_equal("all repetitions recorded", 7, cost.samples);
+            t.assert_true("outlier does not inflate timing uncertainty", cost.sd_us < 2.0);
+        }
+        int failed = 0;
+        for (const auto & values : std::vector<std::vector<double>>{{}, {0}, {-1}, {INFINITY}, {NAN}}) {
+            try { server_adaptive_draft::summarize_cost(1, values); } catch (const std::invalid_argument &) { ++failed; }
+        }
+        t.assert_equal("invalid timing samples rejected", 5, failed);
+    });
+    t.test("promoted acceptance regression rechecks measured alternatives", [&](testing & t) {
+        for (int trial = 0; trial < 28; ++trial) {
+            const int scenario = trial / 7;
+            const int promoted = trial % 7 + 1;
+            const int alternative = promoted == 3 ? 1 : 3;
+            auto options = params;
+            options.speculative.draft.n_max = 7;
+            auto costs = data;
+            costs.rows.clear();
+            for (int d = 0; d <= 7; ++d) {
+                costs.rows.push_back({d, 7, d == promoted || (promoted == 3 && d == 1) ? 100.0 : d == 3 ? 1000.0 : 1e6, 0.0});
+            }
+            server_adaptive_draft runtime(costs, options);
+            int64_t now = 100;
+            bool reached = false;
+            for (int i = 0; i < 128 && !reached; ++i) {
+                const int d = runtime.begin(7, now);
+                const int accepted = d == promoted ? d : std::min(d, 1);
+                now += d == promoted && promoted < 3 ? 375 * (d + 1) : 1000;
+                if (runtime.observe(d, accepted, accepted + 1, false)) {
+                    runtime.drain(now);
+                    const auto state = runtime.status();
+                    reached = state.at("incumbent") == promoted && (promoted != 3 ||
+                            (state.at("probe_draft") == 1 && !state.at("probe").get<bool>()));
+                }
+            }
+            t.assert_true("candidate promoted D" + std::to_string(promoted), reached);
+            if (!reached) { runtime.abandon(now + 1); continue; }
+            int steady = 0;
+            bool rechecked = false;
+            for (int i = 0; i < 48 && !rechecked; ++i) {
+                const auto before = runtime.status();
+                const int d = runtime.begin(7, now, scenario == 3 ? 8 : 512);
+                const int accepted = d == promoted ? (scenario == 2 && steady >= 8 ? d : 0) : std::min(d, 1);
+                now += d == promoted && promoted < 3 ? 375 * (d + 1) : 1000;
+                if (d == promoted && !before.at("probe").get<bool>()) { ++steady; }
+                if (runtime.observe(d, accepted, accepted + 1, false)) {
+                    runtime.drain(now);
+                    if (steady == 8) { t.assert_equal("one low window is insufficient", 0, runtime.status().at("acceptance_refreshes").get<int>()); }
+                    rechecked = runtime.status().at("recovery_probes").get<int>() > 0;
+                    if (scenario >= 2 && steady >= 24) { break; }
+                }
+            }
+            if (scenario >= 2) {
+                t.assert_true("single dip or short horizon avoids recovery probe", !rechecked);
+                if (scenario == 2) { t.assert_equal("recovered acceptance keeps historical evidence", 0, runtime.status().at("acceptance_refreshes").get<int>()); }
+                runtime.abandon(now + 1);
+                continue;
+            }
+            t.assert_true("two low windows trigger recovery D" + std::to_string(promoted), rechecked);
+            if (rechecked) {
+                t.assert_equal("recovery verifies a measured candidate", alternative, runtime.status().at("draft").get<int>());
+                for (int i = 0; i < 8; ++i) {
+                    const int d = runtime.begin(7, now);
+                    now += scenario == 1 ? 100000 : 1000;
+                    const int accepted = scenario == 1 ? 0 : 1;
+                    if (runtime.observe(d, accepted, accepted + 1, false)) { runtime.drain(now); }
+                }
+                t.assert_equal("recovery uses fresh measured speed", scenario == 1 ? promoted : alternative, runtime.status().at("incumbent").get<int>());
+                t.assert_equal("recovery promotion is recorded", scenario == 1 ? 0 : 1, runtime.status().at("recovery_switches").get<int>());
+                if (scenario == 1) {
+                    t.assert_true("failed recovery starts a new cooldown", runtime.status().at("cooldown_tokens").at(alternative).get<int>() >= 128);
+                    t.assert_true("failed recovery restores normal mode", !runtime.status().at("probe").get<bool>());
+                }
+            }
+            runtime.abandon(now + 1);
+        }
+    });
+    t.test("recovery ranks new posterior above old speed", [&](testing & t) {
+        auto options = params;
+        options.speculative.draft.n_max = 7;
+        options.sampling.seed = 1;
+        auto costs = data;
+        costs.rows = {
+            {0, 7, 23747.000, 620.000},
+            {1, 7, 45736.000, 2466.000},
+            {2, 7, 47449.000, 2034.000},
+            {3, 7, 51435.000, 1451.000},
+            {4, 7, 57716.000, 2391.000},
+            {5, 7, 68368.000, 1916.000},
+            {6, 7, 70000.000, 494.000},
+            {7, 7, 71695.000, 2839.000},
+        };
+        struct frame { int draft; int64_t elapsed; int64_t boundary; std::vector<int> accepted; };
+        const std::vector<frame> frames = {
+            {3, 967953, 0, {3, 2, 1, 2, 3, 3, 1, 1, 0, 2, 2, 3, 0, 0, 1, 3}},
+            {4, 829987, 2693, {2, 4, 1, 4, 1, 4, 0, 0}},
+            {3, 939545, 3283, {1, 1, 0, 0, 0, 0, 3, 0, 1, 0, 0, 0, 1, 0, 0, 0}},
+            {3, 499137, 2372, {0, 0, 1, 1, 0, 1, 1, 0}},
+        };
+        server_adaptive_draft runtime(costs, options);
+        int64_t now = 100;
+        for (const auto & frame : frames) {
+            now += frame.boundary;
+            for (size_t i = 0; i < frame.accepted.size(); ++i) {
+                const int remaining = 511 - runtime.status().at("committed_tokens").get<int>();
+                const int d = runtime.begin(7, now, remaining);
+                t.assert_equal("replay follows measured blocks", frame.draft, d);
+                now += frame.elapsed / frame.accepted.size();
+                if (i + 1 == frame.accepted.size()) { now += frame.elapsed % frame.accepted.size(); }
+                if (runtime.observe(d, frame.accepted[i], frame.accepted[i] + 1, false)) { runtime.drain(now); }
+            }
+        }
+        const auto state = runtime.status();
+        t.assert_equal("new regime is detected", 1, state.at("acceptance_refreshes").get<int>());
+        t.assert_equal("unmeasured better candidate participates", 0, state.at("draft").get<int>());
+        t.assert_equal("recovery is verified before promotion", std::string("acceptance_recovery_probe"), state.at("reason").get<std::string>());
+        t.assert_true("old measured speed has no fresh posterior support", state.at("predictions").at(4).at("gain").get<double>() < 0.0);
+        t.assert_true("chosen plan has positive predicted savings", state.at("recovery_expected_saving_us").get<double>() > 0.0);
+        runtime.abandon(now + 1);
+    });
+    t.test("actual forward length", [](testing & t) {
+        common_speculative_draft_params dp;
+        dp.n_max = 3;
+        t.assert_equal("default keeps fixed block", 7, common_speculative_actual_draft_length(dp, 7));
+        dp.actual_draft_length = true;
+        for (int d : {7, 1, 3, 6, 2, 5, 4}) {
+            dp.n_max = d;
+            t.assert_equal("forward uses requested depth", d, common_speculative_actual_draft_length(dp, 7));
+        }
+        int failed = 0;
+        for (int d : {-1, 0, 8}) {
+            dp.n_max = d;
+            try { common_speculative_actual_draft_length(dp, 7); } catch (const std::invalid_argument &) { ++failed; }
+        }
+        t.assert_equal("invalid lengths rejected", 3, failed);
+    });
+    t.test("equal costs promote a longer block without credit", [&](testing & t) {
+        server_adaptive_draft runtime(data, params);
+        int64_t now = 100;
+        int first_probe = 0;
+        for (int round = 1; round <= 64 && runtime.status().at("incumbent") != 4; ++round) {
+            const int d = runtime.begin(4, now);
+            if (runtime.status().at("probe").get<bool>() && first_probe == 0) { first_probe = round; }
+            now += 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("first normal window triggers a probe", 17, first_probe);
+        t.assert_equal("25 percent improvement becomes incumbent", 4, runtime.status().at("incumbent").get<int>());
+        t.assert_true("switch uses recent direct evidence", runtime.status().at("probe_rounds").get<int>() >= 8);
+        t.assert_true("switch ends temporary probing", !runtime.status().at("probe").get<bool>());
+        runtime.abandon(now + 1);
+    });
+    t.test("normal cost ratios permit a shorter block", [&](testing & t) {
+        auto cheaper = data;
+        for (auto & row : cheaper.rows) { if (row.draft > 0) { row.mean_us = 750.0 + 250.0 * row.draft; } }
+        server_adaptive_draft runtime(cheaper, params);
+        int64_t now = 100;
+        for (int round = 0; round < 128 && runtime.status().at("incumbent") != 1; ++round) {
+            const int d = runtime.begin(4, now);
+            now += 750 + 250 * d;
+            if (runtime.observe(d, 0, 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("measured shorter block becomes incumbent", 1, runtime.status().at("incumbent").get<int>());
+        runtime.abandon(now + 1);
+    });
+    t.test("bad probe stops and cools down", [&](testing & t) {
+        server_adaptive_draft runtime(data, params);
+        int64_t now = 100;
+        bool stopped = false;
+        for (int round = 0; round < 64 && !stopped; ++round) {
+            const int d = runtime.begin(4, now);
+            const int accepted = d == 4 ? 0 : d;
+            now += 1000;
+            if (runtime.observe(d, accepted, accepted + 1, false)) {
+                const bool was_probe = runtime.status().at("probe").get<bool>();
+                runtime.drain(now);
+                stopped = was_probe && !runtime.status().at("probe").get<bool>();
+            }
+        }
+        t.assert_true("unprofitable probe was stopped", stopped);
+        t.assert_equal("incumbent restored", 3, runtime.status().at("incumbent").get<int>());
+        t.assert_equal("failed candidate cooldown starts", 128, runtime.status().at("cooldown_tokens").at(4).get<int>());
+        for (int round = 0; round < 16; ++round) {
+            const int d = runtime.begin(4, now);
+            t.assert_equal("failed candidate is not retried during cooldown", 3, d);
+            now += 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("cooldown ages with committed tokens", 64, runtime.status().at("cooldown_tokens").at(4).get<int>());
+        runtime.abandon(now + 1);
+    });
+    t.test("uncertain probes are bounded and back off", [&](testing & t) {
+        auto noisy = data;
+        for (auto & row : noisy.rows) {
+            row.sd_us = 350.0;
+            if (row.draft == 1 || row.draft == 2) { row.mean_us = 1000000.0; }
+        }
+        server_adaptive_draft runtime(noisy, params);
+        int64_t now = 100;
+        int attempts = 0;
+        for (int round = 0; round < 256 && attempts < 2; ++round) {
+            const int d = runtime.begin(4, now);
+            now += 1000;
+            if (runtime.observe(d, d, d + 1, false)) {
+                const bool was_probe = runtime.status().at("probe").get<bool>();
+                runtime.drain(now);
+                if (was_probe && !runtime.status().at("probe").get<bool>()) {
+                    ++attempts;
+                    t.assert_equal("inconclusive episode is capped", 16, runtime.status().at("probe_rounds").get<int>());
+                    t.assert_equal("episode ended at round limit", std::string("round_limit"), runtime.status().at("probe_outcome").get<std::string>());
+                    t.assert_equal("repeated failures lengthen cooldown", 128 * attempts, runtime.status().at("cooldown_tokens").at(4).get<int>());
+                }
+            }
+        }
+        t.assert_equal("candidate can be reconsidered after cooldown", 2, attempts);
+        t.assert_equal("uncertainty prevents premature promotion", 3, runtime.status().at("incumbent").get<int>());
+        runtime.abandon(now + 1);
+    });
+    t.test("credible probe can promote at the round limit", [&](testing & t) {
+        auto noisy = data;
+        for (auto & row : noisy.rows) { row.sd_us = 200.0; }
+        server_adaptive_draft runtime(noisy, params);
+        int64_t now = 100;
+        for (int round = 0; round < 32; ++round) {
+            const int d = runtime.begin(4, now);
+            now += 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+            if (round == 23) { t.assert_true("eight rounds still need evidence", runtime.status().at("probe").get<bool>()); }
+        }
+        t.assert_equal("measured gain can promote at sixteen", 4, runtime.status().at("incumbent").get<int>());
+        t.assert_equal("cap decision uses a bounded evidence threshold", std::string("bounded_probe_gain"), runtime.status().at("reason").get<std::string>());
+        t.assert_equal("episode does not exceed its cap", 16, runtime.status().at("probe_rounds").get<int>());
+        runtime.abandon(now + 1);
+    });
+    t.test("phase change can reverse a prior switch", [&](testing & t) {
+        server_adaptive_draft runtime(data, params);
+        int64_t now = 100;
+        bool reached_four = false;
+        bool returned = false;
+        for (int round = 0; round < 2000 && !returned; ++round) {
+            const int d = runtime.begin(4, now);
+            const int accepted = reached_four && d == 4 ? 0 : d;
+            now += 1000;
+            if (runtime.observe(d, accepted, accepted + 1, false)) {
+                runtime.drain(now);
+                const int incumbent = runtime.status().at("incumbent").get<int>();
+                if (incumbent == 4) { reached_four = true; }
+                else if (reached_four) { returned = true; }
+            }
+        }
+        t.assert_true("easy phase selected longer block", reached_four);
+        t.assert_true("changed acceptance allowed a shorter incumbent", returned);
+        runtime.abandon(now + 1);
+    });
+    t.test("boundary overhead does not inflate short probe cost", [&](testing & t) {
+        server_adaptive_draft runtime(data, params);
+        int64_t now = 100;
+        for (int round = 0; round < 16; ++round) {
+            const int d = runtime.begin(4, now);
+            now += 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+        }
+        t.assert_true("probe scheduled", runtime.status().at("probe").get<bool>());
+        now += 100000;
+        for (int round = 0; round < 8; ++round) {
+            const int d = runtime.begin(4, now);
+            now += 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("probe cost excludes boundary work", 1000.0, runtime.status().at("round_us").get<double>());
+        t.assert_equal("boundary work remains accounted", 100000.0, runtime.status().at("boundary_us").get<double>());
+        t.assert_equal("runtime includes all elapsed work", 124000.0, runtime.status().at("runtime_us").get<double>());
+        t.assert_equal("probe uses normal-window amortization", 6250.0, runtime.status().at("round_overhead_us").get<double>());
+        now += 40000;
+        for (int round = 0; round < 16; ++round) {
+            const int d = runtime.begin(4, now);
+            now += 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("boundary estimate follows new measurements", 85000.0, runtime.status().at("boundary_mean_us").get<double>());
+        t.assert_equal("same amortization after promotion", 5312.5, runtime.status().at("round_overhead_us").get<double>());
+        t.assert_equal("new boundary work is accounted once", 180000.0, runtime.status().at("runtime_us").get<double>());
+        t.assert_equal("inference timing stays separate", 1000.0, runtime.status().at("round_us").get<double>());
+        runtime.abandon(now + 1);
+    });
+    t.test("ordinary promotion respects recent measured throughput", [&](testing & t) {
+        auto costs = data;
+        for (auto & row : costs.rows) { row.mean_us = row.draft == 0 ? 260.0 : row.draft == 3 ? 1000.0 : 1000000.0; }
+        server_adaptive_draft runtime(costs, params);
+        int64_t now = 100;
+        for (int i = 0; i < 24; ++i) {
+            const int d = runtime.begin(4, now);
+            now += d == 0 ? 260 : 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("slower ordinary probe cannot become incumbent", 3, runtime.status().at("incumbent").get<int>());
+        t.assert_equal("guard explains rejected posterior promotion", std::string("ordinary_rate_guard"), runtime.status().at("reason").get<std::string>());
+        runtime.abandon(now + 1);
+    });
+    t.test("fresh ordinary evidence can end cooldown without another probe", [&](testing & t) {
+        auto costs = data;
+        for (auto & row : costs.rows) { row.mean_us = row.draft == 0 ? 500.0 : row.draft == 3 ? 1000.0 : 1000000.0; }
+        server_adaptive_draft runtime(costs, params);
+        int64_t now = 100;
+        bool failed_probe = false;
+        uint64_t failed_at = 0;
+        for (int i = 0; i < 160 && runtime.status().at("incumbent") != 0; ++i) {
+            const int d = runtime.begin(4, now);
+            now += d == 0 ? 1500 : failed_probe ? 3000 : 1000;
+            if (runtime.observe(d, 0, 1, false)) {
+                const bool was_probe = runtime.status().at("probe").get<bool>();
+                runtime.drain(now);
+                if (was_probe && !runtime.status().at("probe").get<bool>() && runtime.status().at("incumbent") == 3) {
+                    failed_probe = true;
+                    failed_at = runtime.status().at("committed_tokens").get<uint64_t>();
+                }
+            }
+        }
+        t.assert_true("initial slower D0 probe was rejected", failed_probe);
+        t.assert_equal("slower incumbent now falls back", 0, runtime.status().at("incumbent").get<int>());
+        t.assert_equal("fresh evidence released ordinary cooldown", 1, runtime.status().at("ordinary_cooldown_releases").get<int>());
+        t.assert_true("switch happened before cooldown expiry", runtime.status().at("committed_tokens").get<uint64_t>() - failed_at < 128);
+        t.assert_equal("no repeat probe was needed", 1, runtime.status().at("probe_episodes").get<int>());
+        runtime.abandon(now + 1);
+    });
+    t.test("recent throughput rechecks stale ordinary cost only when it can repay", [&](testing & t) {
+        for (int64_t recheck_cost : {335, 450, 0}) {
+            const int remaining = recheck_cost == 0 ? 16 : 512;
+            auto costs = data;
+            for (auto & row : costs.rows) { row.mean_us = row.draft == 0 ? 200.0 : row.draft == 3 ? 1000.0 : 1000000.0; }
+            server_adaptive_draft runtime(costs, params);
+            int64_t now = 100;
+            auto run = [&](int depth, int rounds, int64_t round_us, int64_t transition = 0) {
+                for (int i = 0; i < rounds; ++i) {
+                    const int d = runtime.begin(4, now, remaining);
+                    t.assert_equal("expected depth", depth, d);
+                    if (i == 0 && transition > 0) {
+                        runtime.account_transition(transition);
+                        now += transition;
+                    }
+                    now += round_us;
+                    if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+                }
+            };
+            run(3, 16, 1000);
+            run(0, 1, 385, 350);
+            run(0, 8, 335);
+            t.assert_equal("D0 loses to the initial D3 rate", 3, runtime.status().at("incumbent").get<int>());
+            run(3, 16, 1000, 600);
+            run(3, 32, 1000);
+            run(3, 16, 1550);
+            t.assert_true("one slow window cannot recheck D0", !runtime.status().at("probe").get<bool>());
+            run(3, 16, 1550);
+            const auto state = runtime.status();
+            t.assert_true("long history still disfavors D0", state.at("predictions").at(0).at("probability_gain").get<double>() < 0.60);
+            if (recheck_cost > 0) {
+                t.assert_equal("sustained slowdown earns a fresh measurement", std::string("ordinary_recheck"), state.at("reason").get<std::string>());
+                run(0, 1, 385, 350);
+                run(0, 8, recheck_cost);
+                const bool confirmed = recheck_cost == 335;
+                t.assert_equal("fresh D0 speed determines fallback", confirmed ? 0 : 3, runtime.status().at("incumbent").get<int>());
+                const std::string reason = confirmed ? "ordinary_recheck_gain" : "ordinary_recheck_no_gain";
+                t.assert_equal("decision uses the new measurement", reason, runtime.status().at("reason").get<std::string>());
+                t.assert_true("recheck ends after eight stable rounds", !runtime.status().at("probe").get<bool>());
+            } else {
+                t.assert_true("too few tokens remain to pay for recheck", !state.at("probe").get<bool>());
+                t.assert_equal("request stays at D3", 3, state.at("incumbent").get<int>());
+            }
+            runtime.abandon(now + 1);
+        }
+    });
+    t.test("measured D0 gain takes priority over a shorter positive probe", [&](testing & t) {
+        auto options = params;
+        options.sampling.seed = 0;
+        options.speculative.draft.n_max = 2;
+        auto costs = data;
+        costs.rows = {{0, 3, 570.0, 0.0}, {1, 3, 1375.0, 0.0}, {2, 3, 1000.0, 0.0}};
+        server_adaptive_draft runtime(costs, options);
+        int64_t now = 100;
+        auto run = [&](int depth, int rounds, int64_t round_us) {
+            for (int i = 0; i < rounds; ++i) {
+                const int d = runtime.begin(2, now);
+                t.assert_equal("expected depth", depth, d);
+                now += round_us;
+                if (runtime.observe(d, 0, 1, false)) { runtime.drain(now); }
+            }
+        };
+        run(2, 16, 1000);
+        run(0, 8, 1600);
+        run(2, 32, 1000);
+        run(2, 32, 2200);
+        const auto state = runtime.status();
+        const auto candidate = state.at("predictions").at(1);
+        t.assert_true("D1 qualifies for a regular probe",
+                candidate.at("probability_gain").get<double>() >= 0.60 && candidate.at("gain").get<double>() > 0.03);
+        t.assert_equal("measured D0 wins over D1 exploration", 0, state.at("incumbent").get<int>());
+        t.assert_equal("fallback uses the measured rate", std::string("ordinary_recent_gain"), state.at("reason").get<std::string>());
+        t.assert_equal("fallback does not start another probe", 1, state.at("probe_episodes").get<int>());
+        runtime.abandon(now + 1);
+    });
+    t.test("unmeasured D0 can precede a longer probe after incumbent slowdown", [&](testing & t) {
+        auto options = params;
+        options.sampling.seed = 0;
+        auto costs = data;
+        costs.rows = {{0, 3, 275.0, 0.0}, {1, 3, 1000000.0, 0.0}, {2, 3, 1000000.0, 0.0},
+                      {3, 3, 1000.0, 0.0}, {4, 3, 1200.0, 0.0}};
+        for (int64_t ordinary_us : {220, 1200}) {
+            server_adaptive_draft runtime(costs, options);
+            int64_t now = 100;
+            auto run = [&](int depth, int rounds, int accepted, int64_t round_us) {
+                for (int i = 0; i < rounds; ++i) {
+                    const int d = runtime.begin(4, now);
+                    t.assert_equal("expected depth", depth, d);
+                    now += round_us;
+                    if (runtime.observe(d, accepted, accepted + 1, false)) { runtime.drain(now); }
+                }
+            };
+            run(3, 16, 3, 1000);
+            t.assert_equal("first window keeps incumbent", std::string("hold"), runtime.status().at("action").get<std::string>());
+            run(3, 16, 1, 1750);
+            const auto state = runtime.status();
+            const auto candidate = state.at("predictions").at(4);
+            t.assert_true("D4 qualifies for a regular probe",
+                    candidate.at("probability_gain").get<double>() >= 0.60 && candidate.at("gain").get<double>() > 0.03);
+            t.assert_equal("D0 is measured before D4", 0, state.at("probe_draft").get<int>());
+            t.assert_equal("strong prediction only schedules a probe", 3, state.at("incumbent").get<int>());
+            t.assert_equal("decision reports the probe priority", std::string("ordinary_probe_priority"), state.at("reason").get<std::string>());
+            run(0, 8, 0, ordinary_us);
+            t.assert_equal("D0 must confirm its gain in a real window", ordinary_us == 220 ? 0 : 3,
+                    runtime.status().at("incumbent").get<int>());
+            runtime.abandon(now + 1);
+        }
+    });
+    t.test("terminal limit and request reset", [&](testing & t) {
+        server_adaptive_draft runtime(data, params);
+        t.assert_equal("tail is actually shortened", 1, runtime.begin(1, 100));
+        t.assert_true("terminal round drains", runtime.observe(1, 1, 1, true));
+        runtime.drain(1100, true);
+        runtime.abandon(1200);
+        t.assert_true("terminal cost is excluded", !runtime.status().at("cost_usable").get<bool>());
+        server_adaptive_draft next(data, params);
+        t.assert_equal("new request starts at D3", 3, next.begin(4, 2000));
+        t.assert_equal("new request has no probe history", 0, next.status().at("probe_episodes").get<int>());
+        next.abandon(2100);
+    });
+    t.test("cancel first probe round accounts actual time", [&](testing & t) {
+        server_adaptive_draft runtime(data, params);
+        int64_t now = 100;
+        for (int round = 0; round < 16; ++round) {
+            const int d = runtime.begin(4, now);
+            now += 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+        }
+        t.assert_true("probe scheduled", runtime.status().at("probe").get<bool>());
+        runtime.begin(4, now);
+        runtime.abandon(now + 500);
+        t.assert_equal("cancel invents no acceptance round", 16, runtime.status().at("rounds").get<int>());
+        t.assert_equal("cancelled probe time accounted", 500.0, runtime.status().at("probe_us").get<double>());
+        t.assert_true("cancel is not a normal cost observation", !runtime.status().at("cost_usable").get<bool>());
+        t.assert_true("cancel clears pending probe", !runtime.status().at("probe").get<bool>());
+    });
+    t.test("actual block mismatch rejected", [&](testing & t) {
+        server_adaptive_draft runtime(data, params);
+        runtime.begin(7, 100);
+        bool failed = false;
+        try { runtime.observe(7, 0, 1, false); } catch (const std::logic_error &) { failed = true; }
+        t.assert_true("fixed D7 block cannot pretend to be D3", failed);
+        runtime.abandon(1000);
+    });
+    t.test("ordinary fallback, resume and context shift", [&](testing & t) {
+        auto costs = data;
+        for (auto & row : costs.rows) { row.mean_us = row.draft == 0 ? 500.0 : 2000.0; }
+        server_adaptive_draft runtime(costs, params);
+        int64_t now = 100;
+        for (int round = 0; round < 128 && runtime.status().at("incumbent") != 0; ++round) {
+            const int d = runtime.begin(4, now);
+            now += d == 0 ? 500 : 2000;
+            if (runtime.observe(d, 0, 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("ordinary becomes incumbent", 0, runtime.status().at("incumbent").get<int>());
+        t.assert_equal("D0 has direct probe evidence", 8, runtime.status().at("probe_rounds").get<int>());
+        bool resumed = false;
+        for (int round = 0; round < 512 && !resumed; ++round) {
+            const int d = runtime.begin(4, now);
+            now += d == 0 ? 10000 : 1000;
+            if (runtime.observe(d, d, d + 1, false)) { runtime.drain(now); }
+            resumed = runtime.status().at("incumbent").get<int>() > 0;
+        }
+        t.assert_true("changed costs permit DSpark reentry", resumed);
+        runtime.stay_ordinary();
+        for (int round = 0; round < 32; ++round) {
+            t.assert_equal("shift locks D0 until request end", 0, runtime.begin(4, now));
+            now += 10000;
+            if (runtime.observe(0, 0, 1, false)) { runtime.drain(now); }
+        }
+        runtime.abandon(now + 1);
+    });
+    t.test("ordinary aging and isolated slowdown do not reopen speculation", [&](testing & t) {
+        auto costs = data;
+        for (auto & row : costs.rows) { row.mean_us = row.draft == 0 ? 500.0 : 2000.0; }
+        server_adaptive_draft runtime(costs, params);
+        int64_t now = 100;
+        for (int round = 0; round < 128 && runtime.status().at("incumbent") != 0; ++round) {
+            const int d = runtime.begin(4, now);
+            now += d == 0 ? 500 : 2000;
+            if (runtime.observe(d, 0, 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("fixture falls back", 0, runtime.status().at("incumbent").get<int>());
+        const auto episodes = runtime.status().at("probe_episodes").get<uint64_t>();
+        for (int round = 0; round < 544; ++round) {
+            const int d = runtime.begin(4, now);
+            t.assert_equal("aging alone keeps ordinary decoding", 0, d);
+            now += round >= 512 && round < 528 ? 1000 : 500;
+            if (runtime.observe(d, 0, 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("neither stale evidence nor one slow window restarts DSpark", episodes, runtime.status().at("probe_episodes").get<uint64_t>());
+        t.assert_true("suppressed reentry windows are visible", runtime.status().at("reentry_blocked_windows").get<int>() > 0);
+        runtime.abandon(now + 1);
+    });
+    t.test("failed reentry needs another ordinary cost change", [&](testing & t) {
+        auto costs = data;
+        for (auto & row : costs.rows) { row.mean_us = row.draft == 0 ? 500.0 : 2000.0; }
+        server_adaptive_draft runtime(costs, params);
+        int64_t now = 100;
+        for (int round = 0; round < 128 && runtime.status().at("incumbent") != 0; ++round) {
+            const int d = runtime.begin(4, now);
+            now += d == 0 ? 500 : 2000;
+            if (runtime.observe(d, 0, 1, false)) { runtime.drain(now); }
+        }
+        bool failed_reentry = false;
+        for (int round = 0; round < 128 && !failed_reentry; ++round) {
+            const int d = runtime.begin(4, now);
+            const bool reentry = d > 0;
+            now += reentry ? 100000 : 10000;
+            if (runtime.observe(d, 0, 1, false)) {
+                runtime.drain(now);
+                failed_reentry = reentry && !runtime.status().at("probe").get<bool>();
+            }
+        }
+        t.assert_true("cost change tried and rejected an expensive restart", failed_reentry);
+        const auto episodes = runtime.status().at("probe_episodes").get<uint64_t>();
+        for (int round = 0; round < 160; ++round) {
+            const int d = runtime.begin(4, now);
+            t.assert_equal("unchanged ordinary cost cannot retry other depths", 0, d);
+            now += 10000;
+            if (runtime.observe(d, 0, 1, false)) { runtime.drain(now); }
+        }
+        t.assert_equal("failed reentry resets the evidence reference", episodes, runtime.status().at("probe_episodes").get<uint64_t>());
+        runtime.abandon(now + 1);
+    });
+    t.test("ordinary entry warmup is charged without poisoning steady cost", [&](testing & t) {
+        for (bool profitable : {true, false}) {
+            auto costs = data;
+            for (auto & row : costs.rows) { row.mean_us = row.draft == 0 ? 500.0 : 2000.0; }
+            server_adaptive_draft runtime(costs, params);
+            int64_t now = 100;
+            for (int round = 0; round < 128 && runtime.status().at("draft") != 0; ++round) {
+                const int d = runtime.begin(4, now);
+                now += 2000;
+                if (runtime.observe(d, 0, 1, false)) { runtime.drain(now); }
+            }
+            t.assert_true("ordinary probe scheduled", runtime.status().at("probe").get<bool>());
+            const double prior_probe_us = runtime.status().at("probe_us").get<double>();
+            t.assert_equal("probe executes D0", 0, runtime.begin(4, now));
+            t.assert_true("real D0 entry changes active hooks", runtime.needs_mode_transition(true));
+            runtime.account_transition(3000);
+            now += 3000 + 20000;
+            t.assert_true("first forward drains separately", runtime.observe(0, 0, 1, false));
+            runtime.drain(now);
+            t.assert_true("warmup marked", runtime.status().at("measured_warmup").get<bool>());
+            t.assert_true("cold cost is not learned", !runtime.status().at("cost_usable").get<bool>());
+            t.assert_equal("warmup and transition are charged", prior_probe_us + 23000.0, runtime.status().at("probe_us").get<double>());
+            t.assert_equal("warmup is not steady probe evidence", 0, runtime.status().at("probe_rounds").get<int>());
+            for (int round = 0; round < 8; ++round) {
+                t.assert_equal("steady probe stays D0", 0, runtime.begin(4, now));
+                t.assert_true("no repeated mode transition", !runtime.needs_mode_transition(false));
+                now += profitable ? 500 : 20000;
+                const bool drain = runtime.observe(0, 0, 1, false);
+                t.assert_equal("measure eight stable rounds", round == 7, drain);
+                if (drain) { runtime.drain(now); }
+            }
+            t.assert_equal("only stable duration trains cost", profitable ? 500.0 : 20000.0,
+                    runtime.status().at("round_us").get<double>());
+            t.assert_equal("steady window is usable", true, runtime.status().at("cost_usable").get<bool>());
+            t.assert_equal("cost determines fallback", profitable ? 0 : 3, runtime.status().at("incumbent").get<int>());
+            t.assert_equal("all probe time remains charged", prior_probe_us + 23000.0 + 8 * (profitable ? 500 : 20000),
+                    runtime.status().at("probe_us").get<double>());
+            runtime.abandon(now + 1);
+        }
+    });
+    t.test("ordinary tail is timed without false acceptance", [&](testing & t) {
+        server_adaptive_draft runtime(data, params);
+        t.assert_equal("zero capacity opens an ordinary round", 0, runtime.begin(0, 100));
+        t.assert_true("D0 is a pending round, not an empty sentinel", runtime.ordinary_pending());
+        t.assert_true("tail does not save a resume checkpoint", !runtime.needs_mode_transition(true));
+        t.assert_true("paused tail does not replay history", !runtime.needs_mode_transition(false));
+        t.assert_true("terminal D0 drains", runtime.observe(0, 0, 1, true));
+        runtime.drain(1100, true);
+        t.assert_equal("one token accounted", 1, runtime.status().at("committed_tokens").get<int>());
+        t.assert_equal("ordinary tail duration accounted", 1000.0, runtime.status().at("runtime_us").get<double>());
+        t.assert_true("terminal tail is not normal cost evidence", !runtime.status().at("cost_usable").get<bool>());
+        server_adaptive_draft cancel(data, params);
+        cancel.begin(0, 100);
+        cancel.abandon(200);
+        t.assert_equal("cancelled D0 invents no committed token", 0, cancel.status().at("committed_tokens").get<int>());
+        t.assert_equal("cancelled D0 is charged", 100.0, cancel.status().at("runtime_us").get<double>());
+    });
+    t.test("incompatible inputs", [&](testing & t) {
+        int failed = 0;
+        auto reject = [&](const server_adaptive_draft_costs & costs, const common_params & options) {
+            try { server_adaptive_draft runtime(costs, options); } catch (const std::exception &) { ++failed; }
+        };
+        auto bad = data;
+        bad.rows[2].draft = 8;
+        reject(bad, params);
+        bad = data;
+        bad.rows[2].draft = 2;
+        reject(bad, params);
+        bad = data;
+        bad.rows.pop_back();
+        reject(bad, params);
+        bad = data;
+        bad.temperature += 0.1f;
+        reject(bad, params);
+        auto options = params;
+        options.n_parallel = 2;
+        reject(data, options);
+        options = params;
+        options.sampling.temp = 0.0f;
+        reject(data, options);
+        t.assert_equal("all incompatible modes rejected", 6, failed);
+    });
+}
+
 static void test_fixed_d3_ffn_defaults(testing & t) {
     common_params p;
     p.n_parallel = 1;
@@ -607,6 +1263,7 @@ int main(int argc, char ** argv) {
     t.test("decision_depth",  test_decision_depth);
     t.test("glob_match",      test_glob_match);
     t.test("dry_sequence_breakers", test_dry_sequence_breakers);
+    t.test("adaptive_draft", test_adaptive_draft);
     t.test("fixed_d3_ffn_defaults", test_fixed_d3_ffn_defaults);
 
     return t.summary();

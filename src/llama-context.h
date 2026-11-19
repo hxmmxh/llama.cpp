@@ -102,6 +102,7 @@ struct llama_context {
     const float * get_dspark_device_probs(int32_t index);
     void set_dspark_device_target_tokens(llama_context & target, llama_pos pos0, size_t count);
     void clear_dspark_device_target_tokens();
+    void set_dspark_device_target_active(bool active);
 
     llama_token * get_sampled_tokens() const;
     llama_token   get_sampled_token_ith(int32_t idx);

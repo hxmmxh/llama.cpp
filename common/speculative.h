@@ -86,7 +86,11 @@ struct common_speculative_draft_params {
 
     // Opt in to device verification; result holds placeholders until draft_finish().
     bool allow_async = false;
+
+    bool actual_draft_length = false; // Build the requested block instead of truncating a fixed block.
 };
+
+int32_t common_speculative_actual_draft_length(const common_speculative_draft_params & params, int32_t maximum);
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
 
@@ -95,6 +99,16 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
 
 // process the batch and update the internal state of the speculative context
 bool common_speculative_process(common_speculative * spec, const common_batch & batch);
+
+// Single-sequence DSpark only. Pause at the next committed target position; process()
+// records ordinary inputs while paused. Resume replays them to rebuild draft KV.
+bool common_speculative_set_active(common_speculative * spec, bool active, llama_seq_id seq_id, llama_pos pos);
+// Drop the resume checkpoint after a context shift. Remain ordinary until request end.
+void common_speculative_invalidate_resume(common_speculative * spec);
+// Restore feature hooks without replay at request end. True means both prompt caches
+// must be cleared, because draft KV no longer covers the target's cached prefix.
+bool common_speculative_reset_active(common_speculative * spec);
+bool common_speculative_is_active(const common_speculative * spec);
 
 // generate drafts for the sequences specified with `common_speculative_get_draft_params`
 void common_speculative_draft(common_speculative * spec);

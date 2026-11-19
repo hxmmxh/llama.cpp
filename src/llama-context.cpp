@@ -1517,7 +1517,9 @@ void llama_context::reset_dspark_device(llama_context & target) {
     target.dspark_token_embd_ctx.reset();
     dspark_tokens_ready.reset();
     dspark_device_token_tensor = nullptr;
-    dspark_features.layers.clear();
+    // A new speculator must not reuse draws or feature mappings from calibration.
+    dspark_sampling = {};
+    dspark_features = {};
     target.dspark_layers.clear();
     target.dspark_batch_idxs.clear();
     sched_need_reserve = target.sched_need_reserve = true;
@@ -1629,6 +1631,19 @@ void llama_context::clear_dspark_device_target_tokens() {
         dspark_input_tokens.tensor = nullptr;
         cparams.dspark_device_tokens_active = false;
     }
+}
+
+void llama_context::set_dspark_device_target_active(bool active) {
+    synchronize();
+    clear_dspark_device_target_tokens();
+    cparams.dspark_device_extract = active;
+    cparams.dspark_device_tokens = active && dspark_input_tokens.backend ? &dspark_input_tokens : nullptr;
+    cparams.dspark_device_tokens_active = false;
+    sched_need_reserve = true;
+}
+
+void llama_dspark_device_set_target_active(llama_context * target, bool active) {
+    target->set_dspark_device_target_active(active);
 }
 
 const float * llama_dspark_device_get_probs(llama_context * draft, int32_t index) {

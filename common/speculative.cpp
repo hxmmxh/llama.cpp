@@ -1045,6 +1045,84 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     std::vector<float> dspark_markov_w1;
     std::unique_ptr<common_speculative_dspark_markov> dspark_markov;
 
+    bool active = true;
+    bool resume_valid = false;
+    llama_seq_id resume_seq = -1;
+    llama_pos resume_pos = -1;
+    llama_tokens ordinary_inputs;
+    common_prompt_checkpoint ordinary_checkpoint;
+
+    void set_feature_hooks(bool enabled) {
+        llama_synchronize(params.ctx_tgt);
+        llama_synchronize(params.ctx_dft);
+        for (uint32_t k = 0; k < target_layer_ids_n; ++k) {
+            llama_set_embeddings_layer_inp(params.ctx_tgt, (uint32_t) target_layer_ids[k], enabled);
+        }
+        if (dspark_device) { llama_dspark_device_set_target_active(params.ctx_tgt, enabled); }
+    }
+
+    bool set_active(bool enabled, llama_seq_id seq_id, llama_pos pos) {
+        if (enabled == active) { return true; }
+        if (!is_dspark || n_seq != 1 || seq_id != 0 || pos < 0) { return false; }
+        auto * ctx_tgt = params.ctx_tgt;
+        auto * ctx_dft = params.ctx_dft;
+        llama_synchronize(ctx_tgt);
+        llama_synchronize(ctx_dft);
+        if (!enabled) {
+            resume_seq = seq_id;
+            resume_pos = pos;
+            ordinary_inputs.clear();
+            // Non-SWA prefix KV remains resident; preserve the sliding/recurrent state
+            // that ordinary decoding could overwrite before we rebuild draft features.
+            ordinary_checkpoint.update_tgt(ctx_tgt, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            resume_valid = true;
+            set_feature_hooks(false);
+            active = false;
+            return true;
+        }
+        if (!resume_valid || resume_seq != seq_id || pos != resume_pos + (llama_pos) ordinary_inputs.size()) {
+            return false;
+        }
+        if (!llama_memory_seq_rm(llama_get_memory(ctx_tgt), seq_id, resume_pos, -1) ||
+                !ordinary_checkpoint.load_tgt(ctx_tgt, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) ||
+                !llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, resume_pos, -1)) {
+            return false;
+        }
+        set_feature_hooks(true);
+        active = true;
+        common_batch replay(ctx_tgt);
+        const size_t chunk = std::min(llama_n_ubatch(ctx_tgt), llama_n_ubatch(ctx_dft));
+        for (size_t offset = 0; offset < ordinary_inputs.size(); offset += chunk) {
+            replay.clear();
+            const size_t end = std::min(ordinary_inputs.size(), offset + chunk);
+            for (size_t i = offset; i < end; ++i) {
+                replay.add(ordinary_inputs[i], resume_pos + (llama_pos) i, seq_id, false);
+            }
+            if (llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, replay.get()) != 0 || !process(replay)) {
+                active = false; // request cleanup must discard the incomplete caches
+                return false;
+            }
+        }
+        llama_synchronize(ctx_tgt);
+        llama_synchronize(ctx_dft);
+        invalidate_resume();
+        return true;
+    }
+
+    void invalidate_resume() {
+        resume_valid = false;
+        ordinary_inputs.clear();
+        ordinary_checkpoint.clear();
+    }
+
+    bool reset_active() {
+        const bool was_paused = !active;
+        if (was_paused) { set_feature_hooks(true); }
+        active = true;
+        invalidate_resume();
+        return was_paused;
+    }
+
     void add_dspark_markov_bias(std::vector<float> & logits, llama_token prev) {
         GGML_ASSERT(dspark_probabilistic);
         GGML_ASSERT(prev >= 0 && prev < dspark_markov_vocab);
@@ -1277,6 +1355,18 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     bool process(const common_batch & batch_in) override {
+        if (!active) {
+            if (!resume_valid) { return true; }
+            for (const auto & token : batch_in.tokens) {
+                if (token.seq_id != resume_seq || token.id == LLAMA_TOKEN_NULL || token.embd.data ||
+                        !token.seq_ids_extra.empty() || token.pos[0] != resume_pos + (llama_pos) ordinary_inputs.size()) {
+                    return false;
+                }
+                ordinary_inputs.push_back(token.id);
+            }
+            return true;
+        }
+
         if (batch_in.size() <= 0) {
             return true;
         }
@@ -1440,6 +1530,8 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     void draft(common_speculative_draft_params_vec & dparams) override {
+        if (!active) { return; }
+
         ggml_trace_scope trace_scope("dspark.draft", "dspark");
         auto & ctx_dft = params.ctx_dft;
 
@@ -1456,6 +1548,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 continue;
             }
 
+            const int32_t n_draft = dp.actual_draft_length ? common_speculative_actual_draft_length(dp, params.n_max) : params.n_max;
+            if (dp.actual_draft_length && (!is_dspark || !sample_from_anchor || is_dflash2 || is_lilicorr)) {
+                throw std::invalid_argument("actual draft length requires anchor-first DSpark");
+            }
+
             if (dspark_device) {
                 if (!dp.result_q || dp.temp <= 0.0f || n_seq != 1) {
                     throw std::runtime_error("device DSpark requires probabilistic single-sequence decoding");
@@ -1466,7 +1563,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     dspark_device_reseed = false;
                 }
                 std::uniform_real_distribution<double> uniform(0.0, 1.0);
-                std::vector<float> values(params.n_max);
+                std::vector<float> values(n_draft);
                 for (auto & value : values) {
                     value = std::min((float) uniform(dspark_device_rng), std::nextafter(1.0f, 0.0f));
                 }
@@ -1485,7 +1582,6 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
 
             const int32_t n = (int32_t) dp.pos0;
 
-            const int32_t n_draft = params.n_max;
             const int32_t n_block_tokens = is_lilicorr ? block_size : n_draft + (is_dspark && sample_from_anchor ? 0 : 1);
             i_block_beg[seq_id] = batch.size();
             n_block    [seq_id] = n_block_tokens;
@@ -2703,6 +2799,13 @@ static uint32_t common_get_enabled_speculative_configs(const std::vector<common_
     return result;
 }
 
+int32_t common_speculative_actual_draft_length(const common_speculative_draft_params & params, int32_t maximum) {
+    if (maximum <= 0 || (params.actual_draft_length && (params.n_max <= 0 || params.n_max > maximum))) {
+        throw std::invalid_argument("invalid actual draft length");
+    }
+    return params.actual_draft_length ? params.n_max : maximum;
+}
+
 int32_t common_speculative_n_max(const common_params_speculative * spec) {
     int32_t n_max = 0;
 
@@ -3162,6 +3265,34 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
         impl->begin(seq_id, prompt);
         impl->n_call_begin++;
     }
+}
+
+static common_speculative_impl_draft_dflash * common_speculative_dspark(const common_speculative * spec) {
+    if (!spec || spec->impls.size() != 1 || spec->impls.front()->type != COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) {
+        return nullptr;
+    }
+    return static_cast<common_speculative_impl_draft_dflash *>(spec->impls.front().get());
+}
+
+bool common_speculative_set_active(common_speculative * spec, bool active, llama_seq_id seq_id, llama_pos pos) {
+    auto * impl = common_speculative_dspark(spec);
+    if (!impl) { return false; }
+    if (impl->active != active) { common_speculative_draft_finish(spec); }
+    return impl->set_active(active, seq_id, pos);
+}
+
+void common_speculative_invalidate_resume(common_speculative * spec) {
+    if (auto * impl = common_speculative_dspark(spec)) { impl->invalidate_resume(); }
+}
+
+bool common_speculative_reset_active(common_speculative * spec) {
+    auto * impl = common_speculative_dspark(spec);
+    return impl && impl->reset_active();
+}
+
+bool common_speculative_is_active(const common_speculative * spec) {
+    const auto * impl = common_speculative_dspark(spec);
+    return !impl || impl->active;
 }
 
 bool common_speculative_process(common_speculative * spec, const common_batch & batch) {

@@ -4218,6 +4218,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MIN"));
     add_opt(common_arg(
+        {"--spec-adaptive"}, {"--no-spec-adaptive"},
+        "calibrate D0 through max on each model load and select depth online, including ordinary fallback (single-sequence probabilistic DSpark, disabled by default)",
+        [](common_params & params, bool value) {
+            params.speculative.adaptive = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_ADAPTIVE"));
+    add_opt(common_arg(
         {"--spec-draft-n-ubatch"}, "N",
         string_format("physical maximum batch size of the draft context, use a smaller value to spare VRAM (default: %d - same as --n-ubatch)", params.speculative.draft.n_ubatch),
         [](common_params & params, int value) {

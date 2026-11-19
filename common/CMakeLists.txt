@@ -51,6 +51,13 @@ endif()
 # llama-common
 #
 
+add_library(llama-speculative-adaptive STATIC speculative-adaptive.cpp)
+target_include_directories(llama-speculative-adaptive PUBLIC .)
+target_compile_features(llama-speculative-adaptive PUBLIC cxx_std_17)
+if (BUILD_SHARED_LIBS)
+    set_target_properties(llama-speculative-adaptive PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
 set(TARGET llama-common)
 
 include(parsers/sources.cmake)
@@ -109,6 +116,8 @@ add_library(${TARGET}
     sampling.h
     speculative.cpp
     speculative.h
+    speculative-calibration.cpp
+    speculative-calibration.h
     speculative-dspark.h
     subproc.cpp
     subproc.h

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -219,6 +220,66 @@ static void test_top_p_ties() {
     }
 }
 
+static void test_top_k_extreme_logits() {
+    std::vector<llama_token_data> data(1025);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = { (llama_token) i, float(i) / 32.0f - 16.0f, 0.0f };
+    }
+    data[0].logit = -INFINITY;
+    data[1].logit = INFINITY;
+    data[2].logit = -std::numeric_limits<float>::max();
+    data[3].logit = std::numeric_limits<float>::max();
+    auto expected = data;
+    std::sort(expected.begin(), expected.end(), [](const llama_token_data & a, const llama_token_data & b) {
+        return a.logit > b.logit;
+    });
+    for (int k : {129, 512, (int) data.size()}) {
+        auto cur = data;
+        llama_token_data_array arr = { cur.data(), cur.size(), -1, false };
+        auto * sampler = llama_sampler_init_top_k(k);
+        llama_sampler_apply(sampler, &arr);
+        llama_sampler_free(sampler);
+        GGML_ASSERT(arr.size == (size_t) k && arr.sorted);
+        for (int i = 0; i < k; ++i) {
+            GGML_ASSERT(arr.data[i].id == expected[i].id && arr.data[i].logit == expected[i].logit);
+        }
+    }
+}
+
+static void test_top_p_masked_logits() {
+    std::vector<llama_token_data> data(4096);
+    for (size_t i = 0; i < data.size(); ++i) {
+        const size_t rank = (i * 7919) % data.size();
+        data[i] = { (llama_token) i, rank < 2048 ? -float(rank) / 128.0f : -INFINITY, 0.0f };
+    }
+    for (float p : {0.01f, 0.95f, 0.999f}) {
+        for (size_t min_keep : {size_t(1), size_t(300), data.size()}) {
+            auto expected = data;
+            std::sort(expected.begin(), expected.end(), [](const llama_token_data & a, const llama_token_data & b) {
+                return a.logit > b.logit;
+            });
+            llama_token_data_array ref = { expected.data(), expected.size(), -1, true };
+            auto cur = data;
+            llama_token_data_array arr = { cur.data(), cur.size(), -1, false };
+            auto * sampler = llama_sampler_init_top_p(p, min_keep);
+            llama_sampler_apply(sampler, &ref);
+            llama_sampler_apply(sampler, &arr);
+            llama_sampler_free(sampler);
+            GGML_ASSERT(arr.size == ref.size && arr.sorted);
+            std::vector<bool> seen(data.size(), false);
+            for (size_t i = 0; i < arr.size; ++i) {
+                GGML_ASSERT(arr.data[i].logit == ref.data[i].logit);
+                GGML_ASSERT(std::abs(arr.data[i].p - ref.data[i].p) < 1e-6f);
+                const llama_token id = arr.data[i].id;
+                GGML_ASSERT(id >= 0 && (size_t) id < data.size() && !seen[id]);
+                seen[id] = true;
+                GGML_ASSERT(arr.data[i].logit == data[id].logit);
+                if (data[id].logit == -INFINITY) { GGML_ASSERT(arr.data[i].p == 0.0f); }
+            }
+        }
+    }
+}
+
 static void test_min_p(const std::vector<float> & probs, const std::vector<float> & probs_expected, float p) {
     sampler_tester tester(probs, probs_expected);
 
@@ -423,6 +484,8 @@ int main(void) {
     ggml_time_init();
 
     test_dist_singleton_rng();
+    test_top_k_extreme_logits();
+    test_top_p_masked_logits();
     test_top_p_large();
     test_top_p_ties();
 
