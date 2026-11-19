@@ -966,6 +966,14 @@ struct vk_device_struct {
     vk_pipeline pipeline_cumsum_multipass2_f32;
     vk_pipeline pipeline_argmax_f32;
     vk_pipeline pipeline_count_equal_i32;
+    vk_pipeline pipeline_vplane_pack_v8;
+    vk_pipeline pipeline_vplane_pack_compact_v8;
+    vk_pipeline pipeline_vplane_prepare_v8;
+    vk_pipeline pipeline_vplane_unpack_v8;
+    vk_pipeline pipeline_vplane_pack_v4;
+    vk_pipeline pipeline_vplane_pack_compact_v4;
+    vk_pipeline pipeline_vplane_prepare_v4;
+    vk_pipeline pipeline_vplane_unpack_v4;
     vk_pipeline pipeline_dsv4_hc_comb_f32;
     vk_pipeline pipeline_dsv4_hc_pre_f32;
     vk_pipeline pipeline_dsv4_hc_pre_gated_f32;
@@ -1017,6 +1025,8 @@ struct vk_device_struct {
     bool fa_sparse_compact_use_subgroups;
 
     vk_pipeline pipeline_flash_attn_split_k_reduce;
+    vk_pipeline pipeline_flash_attn_ext_tail[3][3];
+    vk_pipeline pipeline_flash_attn_vplane_tail[2];
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, std::pair<vk_pipeline, vk_pipeline>> pipeline_xe_fa_decode_dual_phases;
     vk_pipeline pipeline_count_experts;
 

@@ -2887,9 +2887,15 @@ static ggml_backend_buffer_type_t ggml_backend_rpc_device_get_buffer_type(ggml_b
 
 static bool ggml_backend_rpc_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     GGML_UNUSED(dev);
-    GGML_UNUSED(op);
     //TODO: call the remote backend and cache the results
-    return true;
+    switch (op->op) {
+        case GGML_OP_FLASH_ATTN_EXT_TAIL:
+        case GGML_OP_VPLANE_PACK_V8:
+        case GGML_OP_VPLANE_GATHER_V8:
+            return false;
+        default:
+            return true;
+    }
 }
 
 static bool ggml_backend_rpc_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {

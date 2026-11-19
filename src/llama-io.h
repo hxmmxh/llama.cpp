@@ -14,6 +14,8 @@ public:
     virtual void write(const void * src, size_t size) = 0;
     virtual void write_tensor(ggml_tensor * tensor, size_t offset, size_t size) = 0;
 
+    virtual bool is_counting() const { return false; }
+
     // bytes written so far
     virtual size_t n_bytes() = 0;
 

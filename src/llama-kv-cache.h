@@ -7,6 +7,7 @@
 
 #include <unordered_map>
 #include <vector>
+#include <set>
 
 struct llama_cparams;
 struct llama_hparams;
@@ -114,7 +115,10 @@ public:
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
         // a model can hold more than one cache, so the tensor names have to stay unique
-                 const char *   name_tag = "");
+                 const char *   name_tag = "",
+                     uint32_t   kv_tail_tokens = 0,
+                     uint32_t   n_ubatch = 0,
+                         bool   kv_v_token32 = false);
 
     ~llama_kv_cache() = default;
 
@@ -201,6 +205,20 @@ public:
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
 
     //
+    bool has_tail() const { return tail_tokens != 0; }
+
+    bool has_vplane() const { return vplane_enabled; }
+    uint32_t vplane_input_count(uint32_t n_kv) const;
+    void mark_vplane_writes(const slot_info & sinfo);
+    void set_input_vplane(ggml_tensor * dst, ggml_tensor * map, const ggml_tensor * mask, uint32_t n_kv) const;
+    ggml_tensor * pack_vplane(ggml_context * ctx, ggml_tensor * incoming, ggml_tensor * tiles, int32_t il,
+                               uint32_t n_kv, ggml_tensor *& scratch) const;
+    void commit_vplane(uint32_t n_kv);
+
+    void set_input_tail(ggml_tensor * indices, ggml_tensor * slots, const ggml_tensor * mask,
+                        const llama_ubatch & ubatch, const slot_info & sinfo);
+    ggml_tensor * store_tail(ggml_context * ctx, ggml_tensor * cur, ggml_tensor * indices, int32_t il, bool key) const;
+
     // preparation API
     //
 
@@ -264,7 +282,34 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+        ggml_tensor * k_tail = nullptr;
+        ggml_tensor * v_tail = nullptr;
+        ggml_tensor * vplane = nullptr;
     };
+
+    struct tail_entry {
+        llama_pos pos = -1;
+        uint32_t cell = 0;
+    };
+
+    uint32_t tail_tokens = 0;
+    uint32_t tail_cursor = 0;
+    std::vector<tail_entry> tail_entries;
+
+    bool vplane_enabled = false;
+    int vplane_bits = 8;
+    struct vplane_recent_tile {
+        uint32_t tile;
+        uint32_t slot;
+    };
+    uint32_t vplane_recent_capacity = 0;
+    std::set<uint32_t> vplane_dirty;
+    std::vector<vplane_recent_tile> vplane_recent;
+    std::vector<vplane_recent_tile> vplane_next;
+    std::unordered_map<uint32_t, uint32_t> vplane_incoming;
+
+    uint32_t vplane_live_lanes(uint32_t tile) const;
+    static int32_t vplane_recent_slot(const std::vector<vplane_recent_tile> & recent, uint32_t tile);
 
     bool v_trans = true;  // the value tensor is transposed
 
@@ -344,6 +389,11 @@ private:
     };
 
     void state_write_meta(llama_io_write_i & io, const cell_ranges_t & cr, llama_seq_id seq_id = -1) const;
+    void state_write_vplane(llama_io_write_i & io, const cell_ranges_t & cr) const;
+    bool state_read_vplane(llama_io_read_i & io, const slot_info & sinfo);
+    void state_set_vplane_rows(const kv_layer & layer, const std::vector<int32_t> & rows,
+                               const std::vector<ggml_fp16_t> & values,
+                               const std::vector<vplane_recent_tile> & recent) const;
     void state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const;
 
     // sinfo_in, when set, replaces the find_slot call: the cells are given by the caller
@@ -396,6 +446,18 @@ public:
     //
 
     uint32_t get_n_kv() const;
+
+    bool has_tail() const;
+    bool has_vplane() const;
+    uint32_t vplane_input_count() const;
+    void set_input_vplane(ggml_tensor * dst, ggml_tensor * map, const ggml_tensor * mask) const;
+    ggml_tensor * pack_vplane(ggml_context * ctx, ggml_tensor * incoming, ggml_tensor * tiles, int32_t il,
+                               ggml_tensor *& scratch) const;
+    void commit_vplane() const;
+
+    void set_input_tail(ggml_tensor * indices, ggml_tensor * slots, const ggml_tensor * mask,
+                        const llama_ubatch & ubatch) const;
+    ggml_tensor * store_tail(ggml_context * ctx, ggml_tensor * cur, ggml_tensor * indices, int32_t il, bool key) const;
 
     ggml_type type_k() const;
     ggml_type type_v() const;

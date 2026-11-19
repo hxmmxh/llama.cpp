@@ -516,6 +516,28 @@ struct vk_op_soft_max_push_constants {
     uint32_t has_sinks;
 };
 
+struct vk_op_flash_attn_ext_tail_push_constants {
+    uint32_t offset[11];
+    uint32_t qs, qh, ks, kh, vs, vh, kts, kth, vts, vth;
+    uint32_t dk, dv, nk, nt, nh, nkh, flags;
+    float scale, max_bias, softcap;
+    uint32_t scratch_rows;
+};
+
+static_assert(sizeof(vk_op_flash_attn_ext_tail_push_constants) <= 128);
+
+struct vk_op_vplane_pack_v8_push_constants {
+    uint32_t head_stride;
+    uint32_t recent_tiles;
+};
+
+struct vk_op_vplane_gather_v8_push_constants {
+    uint32_t head_stride;
+    uint32_t scratch_tiles;
+    uint32_t incoming_rows;
+    uint32_t incoming_stride;
+};
+
 struct vk_op_argsort_push_constants {
     uint32_t ncols;
     uint32_t ncols_padded;

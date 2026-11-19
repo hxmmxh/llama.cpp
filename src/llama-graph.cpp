@@ -1,4 +1,5 @@
 #include "llama-graph.h"
+#include "../ggml/src/ggml-vulkan/ggml-vulkan-vplane.h"
 
 #include "llama-impl.h"
 #include "llama-model.h"
@@ -22,6 +23,7 @@
 #include <cstring>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 
@@ -742,6 +744,12 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
     if (self_kq_mask && self_kq_mask->buffer) {
         mctx->get_base()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
     }
+    if (self_vplane_tiles && self_vplane_tiles->buffer) {
+        mctx->get_base()->set_input_vplane(self_vplane_tiles, self_vplane_map, self_kq_mask);
+    }
+    if (self_tail_slots && self_tail_slots->buffer) {
+        mctx->get_base()->set_input_tail(self_tail_indices, self_tail_slots, self_kq_mask, *ubatch);
+    }
 
     // swa tensors may not be allocated if there are no SWA attention layers
     if (self_k_idxs_swa && self_k_idxs_swa->buffer) {
@@ -753,6 +761,12 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
 
     if (self_kq_mask_swa && self_kq_mask_swa->buffer) {
         mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
+    }
+    if (self_vplane_tiles_swa && self_vplane_tiles_swa->buffer) {
+        mctx->get_swa()->set_input_vplane(self_vplane_tiles_swa, self_vplane_map_swa, self_kq_mask_swa);
+    }
+    if (self_tail_slots_swa && self_tail_slots_swa->buffer) {
+        mctx->get_swa()->set_input_tail(self_tail_indices_swa, self_tail_slots_swa, self_kq_mask_swa, *ubatch);
     }
 
     if (self_k_rot && self_k_rot->buffer) {
@@ -770,6 +784,30 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
     if (self_v_rot_swa && self_v_rot_swa->buffer) {
         mctx->get_swa()->set_input_v_rot(self_v_rot_swa);
     }
+}
+
+static int64_t kv_tail_slot_stride(int64_t n_kv, uint32_t n_queries, bool token32) {
+    static const bool reference = [] {
+        const char * value = std::getenv("LLAMA_VPLANE_TAIL_REFERENCE");
+        return value && std::atoi(value) != 0;
+    }();
+    static const bool tiled_prefill = [] {
+        const char * value = std::getenv("LLAMA_VPLANE_TAIL_TILED_PREFILL");
+        return value && std::atoi(value) != 0;
+    }();
+    const auto max_rows = tiled_prefill ? GGML_VK_VPLANE_MAX_TAIL_ROWS : GGML_VK_VPLANE_MAX_QUERY_ROWS;
+    return token32 && !reference && n_queries <= max_rows ? n_kv + n_kv / 32 : n_kv;
+}
+
+static int64_t kv_vplane_map_size(const llama_kv_cache_context * cache, uint32_t n_queries) {
+    static const int mask_tiles_override = [] {
+        const char * value = std::getenv("LLAMA_VPLANE_DECODE_MASK_TILES");
+        return value ? int(std::atoi(value) != 0) : -1;
+    }();
+    const bool mask_tiles = mask_tiles_override < 0 ? cache->type_v() == GGML_TYPE_Q4_0 : mask_tiles_override != 0;
+    const int64_t tiles = cache->get_n_kv() / 32;
+    return mask_tiles && !cache->has_tail() && n_queries <= GGML_VK_VPLANE_MAX_QUERY_ROWS
+        ? tiles * (1 + n_queries) : tiles;
 }
 
 bool llm_graph_input_attn_kv_iswa::can_reuse(const llm_graph_params & params) {
@@ -797,6 +835,24 @@ bool llm_graph_input_attn_kv_iswa::can_reuse(const llm_graph_params & params) {
 
     if (self_kq_mask_swa && self_kq_mask_swa->buffer) {
         res &= can_reuse_kq_mask(self_kq_mask_swa, mctx->get_swa(), params.ubatch, params.cparams);
+    }
+
+    if (self_vplane_tiles && self_vplane_tiles->buffer) {
+        res &= self_vplane_tiles->ne[1] == mctx->get_base()->vplane_input_count() &&
+               self_vplane_map->ne[0] == kv_vplane_map_size(mctx->get_base(), params.ubatch.n_tokens);
+    }
+    if (self_vplane_tiles_swa && self_vplane_tiles_swa->buffer) {
+        res &= self_vplane_tiles_swa->ne[1] == mctx->get_swa()->vplane_input_count() &&
+               self_vplane_map_swa->ne[0] == kv_vplane_map_size(mctx->get_swa(), params.ubatch.n_tokens);
+    }
+
+    if (self_tail_slots && self_tail_slots->buffer) {
+        res &= self_tail_slots->ne[0] == kv_tail_slot_stride(mctx->get_base()->get_n_kv(), params.ubatch.n_tokens, params.cparams.kv_v_token32) &&
+               self_tail_slots->ne[1] == params.ubatch.n_tokens;
+    }
+    if (self_tail_slots_swa && self_tail_slots_swa->buffer) {
+        res &= self_tail_slots_swa->ne[0] == kv_tail_slot_stride(mctx->get_swa()->get_n_kv(), params.ubatch.n_tokens, params.cparams.kv_v_token32) &&
+               self_tail_slots_swa->ne[1] == params.ubatch.n_tokens;
     }
 
     return res;
@@ -3027,8 +3083,14 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * v_mla,
              int64_t   n_kv_max,
                float   kq_scale,
-                 int   il) const {
-    const bool v_trans = v->nb[1] > v->nb[2];
+                 int   il,
+         ggml_tensor * k_tail,
+         ggml_tensor * v_tail,
+         ggml_tensor * tail_slots,
+         ggml_tensor * vplane,
+         ggml_tensor * vplane_scratch,
+         ggml_tensor * vplane_map) const {
+    const bool v_trans = v && v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
     const auto n_stream = k->ne[3];
@@ -3040,7 +3102,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
     q = ggml_permute(ctx0, q, 0, 2, 1, 3);
     k = ggml_permute(ctx0, k, 0, 2, 1, 3);
-    v = ggml_permute(ctx0, v, 0, 2, 1, 3);
+    if (v) {
+        v = ggml_permute(ctx0, v, 0, 2, 1, 3);
+    }
 
     ggml_tensor * cur;
 
@@ -3057,12 +3121,67 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             k = ggml_cast(ctx0, k, GGML_TYPE_F16);
         }
 
-        if (v->type == GGML_TYPE_F32) {
+        if (v && v->type == GGML_TYPE_F32) {
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
 
-        cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
-                                  hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+        const float softcap = hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f;
+        if (tail_slots) {
+            k_tail = ggml_permute(ctx0, k_tail, 0, 2, 1, 3);
+            v_tail = ggml_permute(ctx0, v_tail, 0, 2, 1, 3);
+            if (vplane) {
+                if (sinks || v_mla || n_kv_max != 0 || hparams.f_max_alibi_bias != 0.0f || softcap != 0.0f) {
+                    throw std::runtime_error("Unsupported token32 attention options with a precision tail");
+                }
+                const int bits = k->type == GGML_TYPE_Q4_0 ? 4 : 8;
+                cur = ggml_vk_flash_attn_vplane_tail(ctx0, q, k, vplane, kq_mask, k_tail, v_tail,
+                                                    tail_slots, vplane_scratch, vplane_map, bits, kq_scale,
+                                                    tail_slots->ne[0] != k->ne[1]);
+            } else {
+                cur = ggml_flash_attn_ext_tail(ctx0, q, k, v, kq_mask, k_tail, v_tail, tail_slots,
+                                              kq_scale, hparams.f_max_alibi_bias, softcap);
+            }
+            const ggml_tensor * storage = k_tail;
+            while (storage->view_src) {
+                storage = storage->view_src;
+            }
+            GGML_ASSERT(storage->buffer);
+            auto * owner = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(storage->buffer));
+            if (!owner && ggml_backend_buffer_is_host(storage->buffer)) {
+                owner = ggml_backend_get_device(backend_cpu);
+            }
+            if (!cur || !owner || !ggml_backend_dev_supports_op(owner, cur)) {
+                throw std::runtime_error("KV precision tail is unsupported by the KV cache backend");
+            }
+            for (int i = 0; i < ggml_backend_sched_get_n_backends(sched); ++i) {
+                auto * backend = ggml_backend_sched_get_backend(sched, i);
+                if (ggml_backend_get_device(backend) == owner) {
+                    ggml_backend_sched_set_tensor_backend(sched, cur, backend);
+                    break;
+                }
+            }
+        } else if (vplane && q->ne[1] <= GGML_VK_VPLANE_MAX_QUERY_ROWS) {
+            if (sinks || v_mla || n_kv_max != 0 || hparams.f_max_alibi_bias != 0.0f || softcap != 0.0f) {
+                throw std::runtime_error("Unsupported token32 attention options");
+            }
+            const int bits = k->type == GGML_TYPE_Q4_0 ? 4 : 8;
+            cur = ggml_vk_flash_attn_vplane(ctx0, q, k, vplane, kq_mask, bits, kq_scale, GGML_VK_VPLANE_CACHE_GROUPS, vplane_scratch, vplane_map);
+            auto * storage = vplane->view_src;
+            GGML_ASSERT(storage && storage->buffer);
+            auto * owner = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(storage->buffer));
+            if (!cur || !owner || !ggml_backend_dev_supports_op(owner, cur)) {
+                throw std::runtime_error("Token32 attention is unavailable for this Vulkan device or shape");
+            }
+            for (int i = 0; i < ggml_backend_sched_get_n_backends(sched); ++i) {
+                auto * backend = ggml_backend_sched_get_backend(sched, i);
+                if (ggml_backend_get_device(backend) == owner) {
+                    ggml_backend_sched_set_tensor_backend(sched, cur, backend);
+                    break;
+                }
+            }
+        } else {
+            cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias, softcap);
+        }
         res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
@@ -3573,6 +3692,9 @@ ggml_tensor * llm_graph_context::build_attn(
     auto * k_rot = is_swa ? inp->self_k_rot_swa : inp->self_k_rot;
     auto * v_rot = is_swa ? inp->self_v_rot_swa : inp->self_v_rot;
 
+    auto * tail_indices = is_swa ? inp->self_tail_indices_swa : inp->self_tail_indices;
+    auto * tail_slots = is_swa ? inp->self_tail_slots_swa : inp->self_tail_slots;
+
     static const bool spark_kv_fusion = []() {
         const char * value = getenv("GGML_CUDA_SPARK_KV_FUSION");
         return value && std::atoi(value) != 0;
@@ -3584,7 +3706,7 @@ ggml_tensor * llm_graph_context::build_attn(
     const bool spark_shape = (hparams.n_embd == 2560 && hparams.n_head(il) == 16) ||
         (small_qkv && hparams.n_embd == 2048 && hparams.n_head(il) == 8);
     const bool defer_kv = spark_kv_fusion && arch == LLM_ARCH_SPARK2_5 && spark_shape &&
-        ubatch.n_tokens == 1 && !k_rot && !v_rot;
+        ubatch.n_tokens == 1 && !k_rot && !v_rot && !tail_slots;
 
     if (k_rot) {
         q_cur = llama_mul_mat_hadamard(ctx0, q_cur, k_rot);
@@ -3629,19 +3751,46 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
     }
 
-    if (store_kv && v_cur) {
-        const auto & v_idxs = is_swa ? inp->get_v_idxs_swa() : inp->get_v_idxs();
-
-        ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
-    }
-
+    ggml_tensor * vplane = nullptr;
+    ggml_tensor * scratch = nullptr;
     const auto & kq_mask = is_swa ? inp->get_kq_mask_swa() : inp->get_kq_mask();
+    auto * tiles = is_swa ? inp->self_vplane_tiles_swa : inp->self_vplane_tiles;
+    auto * tile_map = is_swa ? inp->self_vplane_map_swa : inp->self_vplane_map;
+    if (store_kv && v_cur) {
+        if (tiles) {
+            vplane = mctx_cur->pack_vplane(ctx0, v_cur, tiles, il, scratch);
+            ggml_build_forward_expand(gf, vplane);
+        } else {
+            const auto & v_idxs = is_swa ? inp->get_v_idxs_swa() : inp->get_v_idxs();
+            ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, v_idxs, il));
+        }
+    }
 
     ggml_tensor * q = q_cur;
     ggml_tensor * k = use_kv_cur ? k_cur : mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = use_kv_cur ? v_cur : mctx_cur->get_v(ctx0, il);
+    ggml_tensor * v = nullptr;
+    if (!tiles) {
+        v = use_kv_cur ? v_cur : mctx_cur->get_v(ctx0, il);
+    } else if (!tail_slots && n_tokens > GGML_VK_VPLANE_MAX_QUERY_ROWS) {
+        GGML_ASSERT(vplane && scratch && tile_map);
+        auto * unpacked = ggml_vk_vplane_gather_v8(ctx0, vplane, tile_map, scratch);
+        v = ggml_reshape_3d(ctx0, unpacked, 256, 2, unpacked->ne[1]);
+    } else {
+        GGML_ASSERT(vplane && scratch && tile_map);
+    }
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
+    ggml_tensor * k_tail = nullptr;
+    ggml_tensor * v_tail = nullptr;
+    if (tail_slots) {
+        if (!cparams.flash_attn || kq_b || v_mla || !k_cur || !v_cur || use_kv_cur) {
+            throw std::runtime_error("Unsupported attention layer for the KV precision tail");
+        }
+        k_tail = mctx_cur->store_tail(ctx0, k_cur, tail_indices, il, true);
+        v_tail = mctx_cur->store_tail(ctx0, v_cur, tail_indices, il, false);
+    }
+
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il,
+                                       k_tail, v_tail, tail_slots, vplane, scratch, tile_map);
     cb(cur, "kqv_out", il);
 
     if (v_rot) {
@@ -3885,7 +4034,9 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
 
     {
         inp->self_k_idxs = mctx_cur->get_base()->build_input_k_idxs(ctx0, ubatch);
-        inp->self_v_idxs = mctx_cur->get_base()->build_input_v_idxs(ctx0, ubatch);
+        if (!mctx_cur->get_base()->has_vplane()) {
+            inp->self_v_idxs = mctx_cur->get_base()->build_input_v_idxs(ctx0, ubatch);
+        }
 
         inp->self_kq_mask = build_attn_inp_kq_mask(ctx0, mctx_cur->get_base(), ubatch, cparams);
         inp->self_kq_mask_cnv = inp->self_kq_mask;
@@ -3895,11 +4046,43 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
         GGML_ASSERT(hparams.swa_type != LLAMA_SWA_TYPE_NONE && "Use llama_kv_cache for non-SWA");
 
         inp->self_k_idxs_swa = mctx_cur->get_swa()->build_input_k_idxs(ctx0, ubatch);
-        inp->self_v_idxs_swa = mctx_cur->get_swa()->build_input_v_idxs(ctx0, ubatch);
+        if (!mctx_cur->get_swa()->has_vplane()) {
+            inp->self_v_idxs_swa = mctx_cur->get_swa()->build_input_v_idxs(ctx0, ubatch);
+        }
 
         inp->self_kq_mask_swa = build_attn_inp_kq_mask(ctx0, mctx_cur->get_swa(), ubatch, cparams);
         inp->self_kq_mask_swa_cnv = inp->self_kq_mask_swa;
     }
+
+    auto tail_inputs = [&](const llama_kv_cache_context * cache, ggml_tensor *& indices, ggml_tensor *& slots) {
+        if (!cache->has_tail()) {
+            return;
+        }
+        indices = ggml_new_tensor_1d(ctx0, GGML_TYPE_I64, ubatch.n_tokens);
+        const int64_t stride = kv_tail_slot_stride(cache->get_n_kv(), ubatch.n_tokens, cparams.kv_v_token32);
+        slots = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, stride, ubatch.n_tokens);
+        ggml_set_input(indices);
+        ggml_set_input(slots);
+        ggml_set_name(indices, "kv_tail_write_indices");
+        ggml_set_name(slots, "kv_tail_slots");
+    };
+    tail_inputs(mctx_cur->get_base(), inp->self_tail_indices, inp->self_tail_slots);
+    tail_inputs(mctx_cur->get_swa(), inp->self_tail_indices_swa, inp->self_tail_slots_swa);
+
+    auto plane_inputs = [&](const llama_kv_cache_context * cache, ggml_tensor *& tiles, ggml_tensor *& map) {
+        const uint32_t count = cache->vplane_input_count();
+        if (count == 0) {
+            return;
+        }
+        tiles = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, GGML_VK_VPLANE_TILE_RECORD, count);
+        map = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, kv_vplane_map_size(cache, ubatch.n_tokens));
+        ggml_set_input(tiles);
+        ggml_set_input(map);
+        ggml_set_name(tiles, "kv_vplane_tiles");
+        ggml_set_name(map, "kv_vplane_tile_map");
+    };
+    plane_inputs(mctx_cur->get_base(), inp->self_vplane_tiles, inp->self_vplane_map);
+    plane_inputs(mctx_cur->get_swa(), inp->self_vplane_tiles_swa, inp->self_vplane_map_swa);
 
     inp->self_k_rot = mctx_cur->get_base()->build_input_k_rot(ctx0);
     inp->self_v_rot = mctx_cur->get_base()->build_input_v_rot(ctx0);

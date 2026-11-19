@@ -1,0 +1,212 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 128) in;
+
+layout(constant_id = 0) const uint K_TYPE = 0;
+layout(constant_id = 1) const uint V_TYPE = 0;
+
+layout(binding = 0) readonly buffer Q { float q[]; };
+layout(binding = 1) readonly buffer K { uint16_t k[]; };
+layout(binding = 2) readonly buffer V { uint16_t v[]; };
+layout(binding = 3) readonly buffer Mask { uint16_t mask[]; };
+layout(binding = 4) readonly buffer Sinks { float sinks[]; };
+layout(binding = 5) readonly buffer KT { uint16_t kt[]; };
+layout(binding = 6) readonly buffer VT { uint16_t vt[]; };
+layout(binding = 7) readonly buffer Slots { int slots[]; };
+layout(binding = 8) writeonly buffer Out { float out_data[]; };
+#ifdef PACKED_V
+layout(binding = 9) readonly buffer Scratch { uint16_t scratch[]; };
+layout(binding = 10) readonly buffer TileMap { int tile_map[]; };
+#endif
+
+layout(push_constant) uniform Params {
+    uint offset[11];
+    uint qs, qh, ks, kh, vs, vh, kts, kth, vts, vth;
+    uint dk, dv, nk, nt, nh, nkh, flags;
+    float scale, max_bias, softcap;
+    uint scratch_rows;
+} p;
+
+const uint TILE = 8;
+const uint LANES_PER_KEY = 16;
+shared float query[512];
+shared float dots[128];
+shared float weight[TILE];
+shared float maximum, denom, rescale;
+
+float f16(uint bits) {
+    return unpackHalf2x16(bits).x;
+}
+
+// Format IDs select Q4_0, Q4_1 and Q8_0 respectively. Address units are halfwords.
+float body_value(bool key, uint type, uint base, uint d) {
+    const uint block_words = type == 0 ? 9 : (type == 1 ? 10 : 17);
+    const uint block = base + d / 32 * block_words;
+    const uint channel = d % 32;
+    const float scale = f16(key ? uint(k[block]) : uint(v[block]));
+    if (type == 2) {
+        const uint i = block + 1 + channel / 2;
+        const uint bits = key ? uint(k[i]) : uint(v[i]);
+        const int val = int((bits >> (8 * (channel % 2))) & 255u);
+        return scale * float(val < 128 ? val : val - 256);
+    }
+    const uint i = block + (type == 1 ? 2 : 1) + (channel % 16) / 2;
+    const uint bits = key ? uint(k[i]) : uint(v[i]);
+    const uint q4 = (bits >> (8 * (channel % 2) + 4 * (channel / 16))) & 15u;
+    if (type == 0) {
+        return scale * float(int(q4) - 8);
+    }
+    const float minimum = f16(key ? uint(k[block + 1]) : uint(v[block + 1]));
+    return scale * float(q4) + minimum;
+}
+
+#ifdef PACKED_V
+float packed_v_value(uint row, uint head, uint channel) {
+    const uint tile = row / 32u;
+    const uint lane = row % 32u;
+    const int scratch_tile = tile_map[p.offset[10] + tile];
+    if (scratch_tile >= 0 && uint(scratch_tile) < p.scratch_rows / 32u) {
+        const uint src = (uint(scratch_tile) * 32u + lane) * 512u + head * 256u + channel;
+        return f16(uint(scratch[p.offset[9] + src]));
+    }
+    const uint base = p.offset[2] + tile * p.vs + head * p.vh;
+    const uint quad = (lane % 4u) * 64u + channel / 4u;
+    const uint time = lane / 4u;
+    const float scale = f16(uint(v[base + channel]));
+    if (V_TYPE == 0u) {
+        const uint code = uint(v[base + 256u + quad * 8u + (channel % 4u) * 2u + time / 4u]);
+        return scale * float(int((code >> (4u * (time % 4u))) & 15u) - 8);
+    }
+    const uint code = uint(v[base + 256u + quad * 16u + (time / 4u) * 8u + (channel % 4u) * 2u + (time % 4u) / 2u]);
+    const int signed_code = int((code >> (8u * (time % 2u))) & 255u);
+    return scale * float(signed_code < 128 ? signed_code : signed_code - 256);
+}
+#endif
+
+float mask_at(uint row, uint iq) {
+    return f16(uint(mask[p.offset[3] + iq * p.nk + row]));
+}
+
+int slot_at(uint row, uint iq) {
+    return slots[p.offset[7] + iq * p.nk + row];
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint iq = gl_WorkGroupID.x;
+    const uint ih = gl_WorkGroupID.y;
+    const uint ikh = ih / (p.nh / p.nkh);
+
+    for (uint d = lane; d < p.dk; d += 128) {
+        query[d] = q[p.offset[0] + iq * p.qs + ih * p.qh + d];
+    }
+    if (lane == 0) {
+        maximum = uintBitsToFloat(0xff800000u);
+        denom = 0.0;
+    }
+    barrier();
+
+    float slope = 1.0;
+    if (p.max_bias > 0.0) {
+        const uint head_pow2 = 1u << uint(findMSB(p.nh));
+        slope = exp2(-p.max_bias * (ih < head_pow2 ?
+            float(ih + 1u) / float(head_pow2) :
+            float(2u * (ih - head_pow2) + 1u) / float(2u * head_pow2)));
+    }
+    float accum[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (uint start = 0; start < p.nk; start += TILE) {
+        const uint row = start + lane / LANES_PER_KEY;
+        const uint sublane = lane % LANES_PER_KEY;
+        const float bias = row < p.nk ? mask_at(row, iq) : uintBitsToFloat(0xff800000u);
+        const bool visible = !isinf(bias) || bias > 0.0;
+        float score = 0.0;
+        if (visible) {
+            const int slot = slot_at(row, iq);
+            const bool exact = slot >= 0 && uint(slot) < p.nt;
+            const uint base = exact ? p.offset[5] + uint(slot) * p.kts + ikh * p.kth :
+                                      p.offset[1] + row * p.ks + ikh * p.kh;
+            for (uint d = sublane; d < p.dk; d += LANES_PER_KEY) {
+                const float value = exact ? f16(uint(kt[base + d])) : body_value(true, K_TYPE, base, d);
+                score += query[d] * value;
+            }
+        }
+        dots[lane] = score;
+        barrier();
+        if (lane == 0) {
+            float next = maximum;
+            for (uint i = 0; i < TILE; ++i) {
+                const uint r = start + i;
+                const float b = r < p.nk ? mask_at(r, iq) : uintBitsToFloat(0xff800000u);
+                if (isinf(b) && b < 0.0) {
+                    weight[i] = b;
+                    continue;
+                }
+                float sum = 0.0;
+                for (uint j = 0; j < LANES_PER_KEY; ++j) {
+                    sum += dots[i * LANES_PER_KEY + j];
+                }
+                sum *= p.scale;
+                if (p.softcap != 0.0) {
+                    sum = p.softcap * tanh(sum / p.softcap);
+                }
+                weight[i] = sum + slope * b;
+                next = max(next, weight[i]);
+            }
+            rescale = denom > 0.0 ? exp(maximum - next) : 0.0;
+            denom *= rescale;
+            for (uint i = 0; i < TILE; ++i) {
+                weight[i] = isinf(weight[i]) && weight[i] < 0.0 ? 0.0 : exp(weight[i] - next);
+                denom += weight[i];
+            }
+            maximum = next;
+        }
+        barrier();
+        for (uint slice = 0; slice < 4; ++slice) {
+            accum[slice] *= rescale;
+        }
+        for (uint i = 0; i < TILE; ++i) {
+            const float w = weight[i];
+            if (w == 0.0) {
+                continue;
+            }
+            const uint r = start + i;
+            const int slot = slot_at(r, iq);
+            const bool exact = slot >= 0 && uint(slot) < p.nt;
+            const uint base = exact ? p.offset[6] + uint(slot) * p.vts + ikh * p.vth :
+                                      p.offset[2] + r * p.vs + ikh * p.vh;
+            for (uint slice = 0; slice < 4; ++slice) {
+                const uint d = lane + slice * 128;
+                if (d < p.dv) {
+                    const float value = exact ? f16(uint(vt[base + d])) :
+#ifdef PACKED_V
+                        packed_v_value(r, ikh, d);
+#else
+                        body_value(false, V_TYPE, base, d);
+#endif
+                    accum[slice] += w * value;
+                }
+            }
+        }
+        barrier();
+    }
+    if (lane == 0) {
+        rescale = 1.0;
+        if ((p.flags & 1u) != 0u) {
+            const float sink = sinks[p.offset[4] + ih];
+            if (!isinf(sink) || sink > 0.0) {
+                const float next = max(maximum, sink);
+                rescale = denom > 0.0 ? exp(maximum - next) : 0.0;
+                denom = denom * rescale + exp(sink - next);
+            }
+        }
+    }
+    barrier();
+    for (uint slice = 0; slice < 4; ++slice) {
+        const uint d = lane + slice * 128;
+        if (d < p.dv) {
+            out_data[p.offset[8] + (iq * p.nh + ih) * p.dv + d] =
+                denom > 0.0 ? accum[slice] * (rescale / denom) : 0.0;
+        }
+    }
+}

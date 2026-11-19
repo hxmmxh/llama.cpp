@@ -2954,6 +2954,8 @@ common_params common_base_params_to_speculative(const common_params & params) {
         result.model                 = params_spec.mparams;
         result.n_gpu_layers          = params_spec.n_gpu_layers;
         result.tensor_buft_overrides = params_spec.tensor_buft_overrides;
+        result.cache_type_k_swa      = GGML_TYPE_COUNT;
+        result.cache_type_v_swa      = GGML_TYPE_COUNT;
 
         // a draft pinned to a single device doesn't need the meta wrapper an inherited -sm tensor would give it
         // (the device list is null-terminated, so a single device means size 2)
@@ -2971,6 +2973,8 @@ common_params common_base_params_to_speculative(const common_params & params) {
 
     result.cache_type_k  = params_spec.cache_type_k;
     result.cache_type_v  = params_spec.cache_type_v;
+    result.kv_tail_tokens = 0;
+    result.kv_v_token32 = false;
     result.n_outputs_max = params.n_parallel;
     result.n_outputs_max_per_seq = 1;
 

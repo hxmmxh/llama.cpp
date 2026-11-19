@@ -9892,6 +9892,73 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     }
 }
 
+void ggml_compute_forward_flash_attn_ext_tail(const ggml_compute_params * params, ggml_tensor * dst) {
+    const ggml_tensor * q = dst->src[0];
+    const ggml_tensor * k = dst->src[1];
+    const ggml_tensor * v = dst->src[2];
+    const ggml_tensor * mask = dst->src[3];
+    const ggml_tensor * sinks = dst->src[7];
+    const ggml_tensor * kt = dst->src[4];
+    const ggml_tensor * vt = dst->src[5];
+    const ggml_tensor * slots = dst->src[6];
+    const int64_t dk = q->ne[0], dv = v->ne[0], nq = q->ne[1], nh = q->ne[2];
+    const float scale = ggml_get_op_params_f32(dst, 0);
+    const float max_bias = ggml_get_op_params_f32(dst, 1);
+    const float softcap = ggml_get_op_params_f32(dst, 2);
+    const auto to_k = ggml_get_type_traits(k->type)->to_float;
+    const auto to_v = ggml_get_type_traits(v->type)->to_float;
+    std::vector<float> kr(dk), vr(dv), acc(dv);
+    int64_t head_pow2 = 1;
+    while (head_pow2 * 2 <= nh) {
+        head_pow2 *= 2;
+    }
+    for (int64_t row = params->ith; row < nq * nh * q->ne[3]; row += params->nth) {
+        const int64_t iq = row % nq, ih = row / nq % nh, ib = row / (nq * nh);
+        const int64_t ikh = ih / (nh / k->ne[2]);
+        const float * qr = (const float *) ((const char *) q->data + iq*q->nb[1] + ih*q->nb[2] + ib*q->nb[3]);
+        const int32_t * map = (const int32_t *) slots->data + (ib*nq + iq)*k->ne[1];
+        const ggml_fp16_t * mr = (const ggml_fp16_t *) ((const char *) mask->data + iq*mask->nb[1] + (ib % mask->ne[3])*mask->nb[3]);
+        const float slope = max_bias > 0 ? powf(2.0f, -max_bias * (ih < head_pow2 ? float(ih + 1) / head_pow2 : float(2*(ih - head_pow2) + 1) / (2*head_pow2))) : 1.0f;
+        float maximum = -INFINITY, denominator = 0;
+        std::fill(acc.begin(), acc.end(), 0.0f);
+        for (int64_t j = 0; j < k->ne[1]; ++j) {
+            const float bias = slope * GGML_FP16_TO_FP32(mr[j]);
+            if (bias == -INFINITY) {
+                continue;
+            }
+            const int32_t slot = map[j];
+            if (slot >= 0 && slot < kt->ne[1]) {
+                const auto * kk = (const ggml_fp16_t *) ((const char *) kt->data + slot*kt->nb[1] + ikh*kt->nb[2] + ib*kt->nb[3]);
+                const auto * vv = (const ggml_fp16_t *) ((const char *) vt->data + slot*vt->nb[1] + ikh*vt->nb[2] + ib*vt->nb[3]);
+                for (int64_t d = 0; d < dk; ++d) { kr[d] = GGML_FP16_TO_FP32(kk[d]); }
+                for (int64_t d = 0; d < dv; ++d) { vr[d] = GGML_FP16_TO_FP32(vv[d]); }
+            } else {
+                to_k((const char *) k->data + j*k->nb[1] + ikh*k->nb[2] + ib*k->nb[3], kr.data(), dk);
+                to_v((const char *) v->data + j*v->nb[1] + ikh*v->nb[2] + ib*v->nb[3], vr.data(), dv);
+            }
+            float score = 0;
+            for (int64_t d = 0; d < dk; ++d) { score += qr[d]*kr[d]; }
+            score *= scale;
+            if (softcap != 0) { score = softcap*tanhf(score / softcap); }
+            score += bias;
+            const float next = std::max(maximum, score);
+            const float old_scale = expf(maximum - next), weight = expf(score - next);
+            denominator = denominator*old_scale + weight;
+            for (int64_t d = 0; d < dv; ++d) { acc[d] = acc[d]*old_scale + weight*vr[d]; }
+            maximum = next;
+        }
+        const float sink = sinks ? ((const float *) sinks->data)[ih] : -INFINITY;
+        if (sink != -INFINITY) {
+            const float next = std::max(maximum, sink);
+            const float old_scale = expf(maximum - next);
+            denominator = denominator*old_scale + expf(sink - next);
+            for (float & value : acc) { value *= old_scale; }
+        }
+        float * out = (float *) dst->data + ((ib*nq + iq)*nh + ih)*dv;
+        for (int64_t d = 0; d < dv; ++d) { out[d] = denominator > 0 ? acc[d] / denominator : 0; }
+    }
+}
+
 void ggml_compute_forward_flash_attn_ext(
         const ggml_compute_params * params,
         ggml_tensor * dst) {

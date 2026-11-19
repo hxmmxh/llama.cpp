@@ -601,6 +601,9 @@ extern "C" {
         GGML_OP_OPT_STEP_SGD,
 
         GGML_OP_GLU,
+        GGML_OP_FLASH_ATTN_EXT_TAIL,
+        GGML_OP_VPLANE_PACK_V8,
+        GGML_OP_VPLANE_GATHER_V8,
 
         GGML_OP_COUNT,
     };
@@ -2508,6 +2511,21 @@ extern "C" {
             struct ggml_tensor  * k,
             struct ggml_tensor  * v,
             struct ggml_tensor  * mask,
+            float                 scale,
+            float                 max_bias,
+            float                 logit_softcap);
+
+    // Requires an F16 mask, slots is I32 [n_kv, n_query, n_batch]. Negative or invalid slots use the quantized body.
+    // Valid slots replace the corresponding body row with an F16 row from k_tail/v_tail.
+    GGML_API struct ggml_tensor * ggml_flash_attn_ext_tail(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * mask,
+            struct ggml_tensor  * k_tail,
+            struct ggml_tensor  * v_tail,
+            struct ggml_tensor  * slots,
             float                 scale,
             float                 max_bias,
             float                 logit_softcap);

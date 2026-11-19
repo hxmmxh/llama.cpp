@@ -1760,6 +1760,8 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     cparams.type_k_swa = params.cache_type_k_swa;
     cparams.type_v_swa = params.cache_type_v_swa;
+    cparams.kv_tail_tokens = params.kv_tail_tokens;
+    cparams.kv_v_token32 = params.kv_v_token32;
     cparams.type_v = params.cache_type_v;
     cparams.sampler_token_only = params.sampling.sampler_token_only && params.sampling.n_probs == 0;
 

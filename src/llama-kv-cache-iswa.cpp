@@ -28,9 +28,11 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
     const  layer_reuse_cb & reuse,
     const  layer_share_cb & share,
                     ggml_type   type_k_swa,
-                    ggml_type   type_v_swa) :
+                    ggml_type   type_v_swa,
+                     uint32_t   kv_tail_tokens,
+                         bool   kv_v_token32) :
     llama_kv_cache_iswa(model, no_alloc, model.hparams, type_k, type_v, v_trans, offload, swa_full, unified,
-            kv_size, n_seq_max, n_ubatch, mem_other, filter, reuse, share, type_k_swa, type_v_swa) {
+            kv_size, n_seq_max, n_ubatch, mem_other, filter, reuse, share, type_k_swa, type_v_swa, kv_tail_tokens, kv_v_token32) {
 }
 
 llama_kv_cache_iswa::llama_kv_cache_iswa(
@@ -51,7 +53,9 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
     const  layer_reuse_cb & reuse,
     const  layer_share_cb & share,
                     ggml_type   type_k_swa,
-                    ggml_type   type_v_swa) : unified(unified) {
+                    ggml_type   type_v_swa,
+                     uint32_t   kv_tail_tokens,
+                         bool   kv_v_token32) : unified(unified) {
 
     // chain filters
     const layer_filter_cb filter_base = [&](int32_t il) {
@@ -99,14 +103,24 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
     kv_base = std::make_unique<llama_kv_cache>(
             model, no_alloc, hparams, type_k, type_v,
             v_trans, offload, unified, size_base, n_seq_max,
-            0, LLAMA_SWA_TYPE_NONE, mem_other_base, filter_base, reuse, share);
+            0, LLAMA_SWA_TYPE_NONE, mem_other_base, filter_base, reuse, share, "", kv_tail_tokens, n_ubatch, kv_v_token32);
 
     LLAMA_LOG_INFO("%s: creating     SWA KV cache, size = %u cells\n", __func__, size_swa);
 
+    // Every visible SWA row is within the precision tail. Keep a single F16 window.
+    const bool swa_f16 = kv_v_token32 && !swa_full && hparams.swa_type == LLAMA_SWA_TYPE_STANDARD &&
+        kv_tail_tokens >= hparams.n_swa && type_k_swa == GGML_TYPE_COUNT && type_v_swa == GGML_TYPE_COUNT;
+    const auto swa_k = swa_f16 ? GGML_TYPE_F16 : (type_k_swa == GGML_TYPE_COUNT ? type_k : type_k_swa);
+    const auto swa_v = swa_f16 ? GGML_TYPE_F16 : (type_v_swa == GGML_TYPE_COUNT ? type_v : type_v_swa);
+    const bool swa_is_f16 = swa_k == GGML_TYPE_F16 && swa_v == GGML_TYPE_F16;
+    if (swa_f16) {
+        LLAMA_LOG_INFO("%s: token32 tail covers the %u-token SWA window; using one F16 cache\n", __func__, hparams.n_swa);
+    }
     kv_swa = std::make_unique<llama_kv_cache>(
-            model, no_alloc, hparams, type_k_swa == GGML_TYPE_COUNT ? type_k : type_k_swa, type_v_swa == GGML_TYPE_COUNT ? type_v : type_v_swa,
+            model, no_alloc, hparams, swa_k, swa_v,
             v_trans, offload, unified, size_swa, n_seq_max,
-            hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share);
+            hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share, "",
+            swa_is_f16 ? 0 : kv_tail_tokens, n_ubatch, kv_v_token32 && !swa_is_f16);
 }
 
 void llama_kv_cache_iswa::clear(bool data) {

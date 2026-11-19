@@ -1,0 +1,64 @@
+#version 450
+
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const bool UNPACK = false;
+layout(constant_id = 1) const bool Q4 = false;
+const uint TILE_WORDS = Q4 ? 1152u : 2176u;
+layout(binding = 0, std430) readonly buffer Packed { uint packed[]; };
+layout(binding = 1, std430) readonly buffer Meta { int meta[]; };
+layout(binding = 2, std430) readonly buffer Scratch { uint scratch[]; };
+layout(binding = 3, std430) readonly buffer Values { float values[]; };
+layout(binding = 4, std430) writeonly buffer Output { uint output_v[]; };
+
+layout(push_constant) uniform Params {
+    uint head_stride;
+    uint scratch_tiles;
+    uint incoming_rows;
+    uint incoming_stride;
+} p;
+
+void main() {
+    const uint index = gl_WorkGroupID.y;
+    const uint head = gl_WorkGroupID.z;
+    const uint pair = gl_LocalInvocationID.x;
+
+    int tile = int(index);
+    uint live = 0xffffffffu;
+    int raw_slot = meta[index];
+    if (!UNPACK) {
+        tile = meta[index * 36u];
+        live = uint(meta[index * 36u + 1u]);
+        raw_slot = meta[index * 36u + 2u];
+    }
+    const uint base = head * p.head_stride + uint(max(tile, 0)) * TILE_WORDS;
+    const vec2 scale = unpackHalf2x16(packed[base + pair]);
+
+    for (uint lane = 0; lane < 32u; ++lane) {
+        uint value = 0;
+        if (tile >= 0 && uint(tile) < p.head_stride / TILE_WORDS && (live & (1u << lane)) != 0u) {
+            int row = UNPACK ? -1 : meta[index * 36u + 4u + lane];
+            if (row >= 0 && uint(row) < p.incoming_rows) {
+                const uint src = uint(row) * p.incoming_stride + head * 256u + pair * 2u;
+                value = packHalf2x16(vec2(values[src], values[src + 1u]));
+            } else if (raw_slot >= 0 && uint(raw_slot) < p.scratch_tiles) {
+                value = scratch[(uint(raw_slot) * 32u + lane) * 256u + head * 128u + pair];
+            } else {
+                const uint time = lane / 4u;
+                const uint column = pair * 2u;
+                const uint quad = (lane % 4u) * 64u + column / 4u;
+                ivec2 code;
+                if (Q4) {
+                    const uint src = base + 128u + quad * 4u + column % 4u;
+                    code = ivec2(bitfieldExtract(packed[src], int(4u * time), 4),
+                                 bitfieldExtract(packed[src + 1u], int(4u * time), 4)) - 8;
+                } else {
+                    const uint src = base + 128u + quad * 8u + (time / 4u) * 4u + column % 4u;
+                    code = ivec2(bitfieldExtract(int(packed[src]), int(8u * (time % 4u)), 8),
+                                 bitfieldExtract(int(packed[src + 1u]), int(8u * (time % 4u)), 8));
+                }
+                value = packHalf2x16(vec2(code) * scale);
+            }
+        }
+        output_v[(index * 32u + lane) * 256u + head * 128u + pair] = value;
+    }
+}

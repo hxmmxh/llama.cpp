@@ -602,6 +602,7 @@ struct common_params {
 
     ggml_type cache_type_k_swa = GGML_TYPE_COUNT;
     ggml_type cache_type_v_swa = GGML_TYPE_COUNT;
+    bool kv_v_token32 = false;
     uint32_t kv_tail_tokens = 0;
 
     size_t moe_cache_size = 0; // GPU cache size in bytes for the MoE experts kept in the CPU, split among the GPUs like the layers

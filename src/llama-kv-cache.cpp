@@ -1,4 +1,5 @@
 #include "llama-kv-cache.h"
+#include "../ggml/src/ggml-vulkan/ggml-vulkan-vplane.h"
 
 #include "llama-impl.h"
 #include "llama-io.h"
@@ -79,8 +80,11 @@ llama_kv_cache::llama_kv_cache(
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse,
     const  layer_share_cb & share,
-               const char * name_tag) :
-    model(model), hparams(hparams), v_trans(v_trans),
+               const char * name_tag,
+                  uint32_t   kv_tail_tokens,
+                  uint32_t   n_ubatch,
+                      bool   kv_v_token32) :
+    model(model), hparams(hparams), vplane_enabled(kv_v_token32), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_swa(n_swa), swa_type(swa_type),
     ctxs_bufs(no_alloc),
     other(static_cast<llama_kv_cache *>(mem_other)),
@@ -100,6 +104,34 @@ llama_kv_cache::llama_kv_cache(
 
     const uint32_t n_layer = hparams.n_layer_all;
 
+    if (vplane_enabled) {
+        if (n_stream != 1 || other || v_trans || !offload || hparams.is_mla() ||
+            kv_size % 32 != 0 || kv_size > 131328 || type_k != type_v ||
+            (type_v != GGML_TYPE_Q4_0 && type_v != GGML_TYPE_Q8_0)) {
+            throw std::runtime_error("Unsupported token32 cache configuration");
+        }
+        vplane_bits = type_v == GGML_TYPE_Q4_0 ? 4 : 8;
+        vplane_recent_capacity = std::min<uint32_t>(8, kv_size / 32);
+        vplane_recent.reserve(vplane_recent_capacity);
+        vplane_next.reserve(vplane_recent_capacity);
+        LLAMA_LOG_INFO("%s: token32 V%d enabled (%u packed tiles, %u recent F16 tiles)\n",
+                       __func__, vplane_bits, kv_size / 32, vplane_recent_capacity);
+    }
+
+    if (kv_tail_tokens > 0) {
+        auto supported = [](ggml_type type) {
+            return type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q8_0;
+        };
+        if (n_stream != 1 || n_seq_max != 1 || n_ubatch == 0 || other || v_trans || hparams.is_mla() ||
+            !supported(type_k) || !supported(type_v)) {
+            throw std::runtime_error("KV precision tail requires dense Q4_0, Q4_1 or Q8_0 K/V");
+        }
+        tail_tokens = std::min(kv_tail_tokens, n_swa ? std::min(n_swa, kv_size) : kv_size);
+        const uint64_t capacity = uint64_t(tail_tokens) + n_ubatch - 1;
+        tail_entries.resize(std::min<uint64_t>(kv_size, capacity));
+        LLAMA_LOG_INFO("%s: F16 tail = %u tokens, %zu physical rows per layer\n", __func__, tail_tokens, tail_entries.size());
+    }
+
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
     struct ggml_backend_buft_comparator {
         bool operator()(const ggml_backend_buffer_type_t & lhs, const ggml_backend_buffer_type_t & rhs) const {
@@ -113,7 +145,7 @@ llama_kv_cache::llama_kv_cache(
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
-                /*.mem_size   =*/ size_t(2u*(1 + n_stream)*n_layer*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t((2u*(1 + n_stream) + (has_tail() ? 2u : 0u) + (vplane_enabled ? 1u : 0u))*n_layer*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -217,6 +249,12 @@ llama_kv_cache::llama_kv_cache(
             buft = ggml_backend_dev_buffer_type(dev);
 
             dev_name = ggml_backend_dev_name(dev);
+            if (vplane_enabled && (std::strncmp(dev_name, "Vulkan", 6) != 0 ||
+                !std::strstr(ggml_backend_dev_description(dev), "140T") ||
+                hparams.n_embd_head_k(il) != 256 || hparams.n_embd_head_v(il) != 256 ||
+                hparams.n_head(il) != 8 || hparams.n_head_kv(il) != 2 || n_embd_v_gqa != 512)) {
+                throw std::runtime_error("Token32 requires D256 GQA4 layers offloaded to Vulkan Arc 140T");
+            }
         }
 
         LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
@@ -230,22 +268,37 @@ llama_kv_cache::llama_kv_cache(
         const bool has_v = !is_mla;
 
         ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, kv_size, n_stream) : nullptr;
-        ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream) : nullptr;
+        ggml_tensor * v = !has_v ? nullptr :
+            vplane_enabled ? ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_embd_v_gqa, 32 * vplane_recent_capacity) :
+            ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, kv_size, n_stream);
 
         has_k && ggml_format_name(k, "cache_%sk_l%d", name_tag, il);
-        has_v && ggml_format_name(v, "cache_%sv_l%d", name_tag, il);
+        has_v && ggml_format_name(v, vplane_enabled ? "cache_%sv_recent_l%d" : "cache_%sv_l%d", name_tag, il);
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
 
         for (uint32_t s = 0; s < n_stream; ++s) {
             k_stream.push_back(has_k ? ggml_view_2d(ctx, k, n_embd_k_gqa, kv_size, k->nb[1], s*k->nb[2]) : nullptr);
-            v_stream.push_back(has_v ? ggml_view_2d(ctx, v, n_embd_v_gqa, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
+            v_stream.push_back(has_v && !vplane_enabled ? ggml_view_2d(ctx, v, n_embd_v_gqa, kv_size, v->nb[1], s*v->nb[2]) : nullptr);
         }
 
         map_layer_ids[il] = layers.size();
 
         layers.push_back({ il, k, v, k_stream, v_stream, });
+        if (vplane_enabled) {
+            GGML_ASSERT(has_v);
+            auto & layer = layers.back();
+            layer.vplane = ggml_new_tensor_3d(ctx, GGML_TYPE_I8, ggml_vk_vplane_tile_bytes(vplane_bits), kv_size / 32, 2);
+            ggml_format_name(layer.vplane, "cache_%sv_token32_l%d", name_tag, il);
+        }
+        if (has_tail()) {
+            auto & layer = layers.back();
+            layer.k_tail = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_embd_k_gqa, tail_entries.size());
+            layer.v_tail = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, n_embd_v_gqa, tail_entries.size());
+            ggml_format_name(layer.k_tail, "cache_%sk_tail_l%d", name_tag, il);
+            ggml_format_name(layer.v_tail, "cache_%sv_tail_l%d", name_tag, il);
+        }
     }
 
     if (reuse) {
@@ -321,7 +374,7 @@ llama_kv_cache::llama_kv_cache(
         }
 
         const bool attn_rot_v =
-            !attn_rot_disable &&
+            !vplane_enabled && !attn_rot_disable &&
             n_embd_head_v_all > 0 &&
             ggml_is_quantized(type_v) &&
             hparams.n_embd_head_v() % 64 == 0;
@@ -374,6 +427,12 @@ llama_kv_cache::llama_kv_cache(
 }
 
 void llama_kv_cache::clear(bool data) {
+    vplane_dirty.clear();
+    vplane_recent.clear();
+    vplane_next.clear();
+    vplane_incoming.clear();
+    std::fill(tail_entries.begin(), tail_entries.end(), tail_entry{});
+    tail_cursor = 0;
     for (uint32_t s = 0; s < n_stream; ++s) {
         v_cells[s].reset();
         v_heads[s] = 0;
@@ -415,6 +474,9 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
             }
 
             if (cells.seq_has(i, seq_id) && cells.seq_rm(i, seq_id)) {
+                if (vplane_enabled) {
+                    vplane_dirty.insert(i / 32);
+                }
                 if (new_head == cells.size()) {
                     new_head = i;
                 }
@@ -439,6 +501,9 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
                 }
 
                 cells.rm(i);
+                if (vplane_enabled) {
+                    vplane_dirty.insert(i / 32);
+                }
 
                 if (new_head == cells.size()) {
                     new_head = i;
@@ -449,6 +514,12 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
             if (new_head != cells.size() && new_head < head) {
                 head = new_head;
             }
+        }
+    }
+
+    for (auto & entry : tail_entries) {
+        if (entry.pos >= p0 && entry.pos < p1 && v_cells[0].is_empty(entry.cell)) {
+            entry = {};
         }
     }
 
@@ -562,6 +633,9 @@ void llama_kv_cache::seq_keep(llama_seq_id seq_id) {
 
     for (uint32_t i = 0; i < cells.size(); ++i) {
         if (cells.seq_keep(i, seq_id)) {
+            if (vplane_enabled) {
+                vplane_dirty.insert(i / 32);
+            }
             if (new_head == cells.size()) {
                 new_head = i;
             }
@@ -605,6 +679,8 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, ll
         return;
     }
 
+    std::fill(tail_entries.begin(), tail_entries.end(), tail_entry{});
+
     for (uint32_t i = 0; i < cells.size(); ++i) {
         if (!cells.pos_in(i, p0, p1)) {
             continue;
@@ -612,6 +688,9 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, ll
 
         if (cells.seq_has(i, seq_id)) {
             if (cells.pos_add(i, shift)) {
+                if (vplane_enabled) {
+                    vplane_dirty.insert(i / 32);
+                }
                 if (new_head == cells.size()) {
                     new_head = i;
                 }
@@ -651,6 +730,8 @@ void llama_kv_cache::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, in
     if (p0 == p1) {
         return;
     }
+
+    std::fill(tail_entries.begin(), tail_entries.end(), tail_entry{});
 
     for (uint32_t i = 0; i < cells.size(); ++i) {
         if (!cells.pos_in(i, p0, p1)) {
@@ -753,6 +834,7 @@ llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_
 
     // remember the old state of the cells so we can restore it in the end
     std::vector<state_t> states;
+    auto vplane_dirty_before = std::move(vplane_dirty);
 
     bool success = true;
 
@@ -798,6 +880,8 @@ llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_
             head = it->v_heads_old[s];
         }
     }
+
+    vplane_dirty = std::move(vplane_dirty_before);
 
     if (!success) {
         return {};
@@ -1220,7 +1304,7 @@ ggml_type llama_kv_cache::type_k() const {
 }
 
 ggml_type llama_kv_cache::type_v() const {
-    return layers[0].v->type;
+    return vplane_enabled ? (vplane_bits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0) : layers[0].v->type;
 }
 
 std::vector<uint32_t> llama_kv_cache::get_layer_ids() const {
@@ -1250,6 +1334,132 @@ uint32_t llama_kv_cache::get_stream(llama_seq_id seq_id) const {
     GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
 
     return seq_to_stream[seq_id];
+}
+
+int32_t llama_kv_cache::vplane_recent_slot(const std::vector<vplane_recent_tile> & recent, uint32_t tile) {
+    const auto entry = std::find_if(recent.begin(), recent.end(), [tile](const vplane_recent_tile & item) {
+        return item.tile == tile;
+    });
+    return entry == recent.end() ? -1 : int32_t(entry->slot);
+}
+
+uint32_t llama_kv_cache::vplane_live_lanes(uint32_t tile) const {
+    uint32_t live = 0;
+    for (uint32_t lane = 0; lane < 32; ++lane) {
+        if (!v_cells[0].is_empty(32 * tile + lane)) {
+            live |= uint32_t(1) << lane;
+        }
+    }
+    return live;
+}
+
+uint32_t llama_kv_cache::vplane_input_count(uint32_t n_kv) const {
+    if (!vplane_enabled) {
+        return 0;
+    }
+    uint32_t count = 0;
+    for (uint32_t tile : vplane_dirty) {
+        if (tile >= n_kv / 32) {
+            break;
+        }
+        count += vplane_live_lanes(tile) != 0;
+    }
+    return std::max(1u, count);
+}
+
+void llama_kv_cache::mark_vplane_writes(const slot_info & sinfo) {
+    GGML_ASSERT(sinfo.n_stream() == 1 && sinfo.strm[0] == 0);
+    vplane_incoming.clear();
+    vplane_next = vplane_recent;
+    const auto & rows = sinfo.idxs[0];
+    for (uint32_t i = 0; i < rows.size(); ++i) {
+        const uint32_t tile = rows[i] / 32;
+        vplane_dirty.insert(tile);
+        vplane_incoming[rows[i]] = i;
+        const auto entry = std::find_if(vplane_next.begin(), vplane_next.end(), [tile](const vplane_recent_tile & item) {
+            return item.tile == tile;
+        });
+        if (entry != vplane_next.end()) {
+            const auto cached = *entry;
+            vplane_next.erase(entry);
+            vplane_next.push_back(cached);
+        } else if (vplane_next.size() == vplane_recent_capacity) {
+            const uint32_t slot = vplane_next.front().slot;
+            vplane_next.erase(vplane_next.begin());
+            vplane_next.push_back({tile, slot});
+        } else {
+            vplane_next.push_back({tile, uint32_t(vplane_next.size())});
+        }
+    }
+}
+
+void llama_kv_cache::set_input_vplane(ggml_tensor * dst, ggml_tensor * map, const ggml_tensor * mask, uint32_t n_kv) const {
+    const uint32_t n_tiles = n_kv / 32;
+    GGML_ASSERT(dst->ne[0] == GGML_VK_VPLANE_TILE_RECORD);
+    std::vector<uint32_t> input(dst->ne[0] * dst->ne[1], UINT32_MAX);
+    std::vector<int32_t> tile_map(map->ne[0], -1);
+    if (map->ne[0] != n_tiles) {
+        GGML_ASSERT(mask && mask->type == GGML_TYPE_F16 && mask->ne[0] == n_kv &&
+                    map->ne[0] == (1 + mask->ne[1]) * n_tiles && ggml_is_contiguous(mask) &&
+                    ggml_backend_buffer_is_host(mask->buffer));
+        const auto * data = static_cast<const ggml_fp16_t *>(mask->data);
+        for (int64_t i = 0; i < mask->ne[1]; ++i) {
+            for (uint32_t tile = 0; tile < n_tiles; ++tile) {
+                tile_map[(i + 1) * n_tiles + tile] = ggml_vk_vplane_tile_mask(data + i * n_kv + 32 * tile);
+            }
+        }
+    }
+    size_t index = 0;
+    for (uint32_t tile : vplane_dirty) {
+        if (tile >= n_kv / 32) {
+            break;
+        }
+        const uint32_t live = vplane_live_lanes(tile);
+        if (!live) {
+            continue;
+        }
+        GGML_ASSERT(index < size_t(dst->ne[1]));
+        uint32_t * row = input.data() + index * dst->ne[0];
+        tile_map[tile] = int32_t(index++);
+        row[0] = tile;
+        row[1] = live;
+        row[2] = uint32_t(vplane_recent_slot(vplane_recent, tile));
+        row[3] = uint32_t(vplane_recent_slot(vplane_next, tile));
+        for (uint32_t lane = 0; lane < 32; ++lane) {
+            const auto written = vplane_incoming.find(tile * 32 + lane);
+            if (written != vplane_incoming.end()) {
+                row[4 + lane] = written->second;
+            }
+        }
+    }
+    ggml_backend_tensor_set(dst, input.data(), 0, ggml_nbytes(dst));
+    ggml_backend_tensor_set(map, tile_map.data(), 0, ggml_nbytes(map));
+}
+
+ggml_tensor * llama_kv_cache::pack_vplane(
+        ggml_context * ctx, ggml_tensor * incoming, ggml_tensor * tiles, int32_t il,
+        uint32_t n_kv, ggml_tensor *& scratch) const {
+    const auto & layer = layers[map_layer_ids.at(il)];
+    auto * packed = layer.vplane;
+    scratch = ggml_vk_vplane_gather_v8(ctx, packed, tiles, layer.v, incoming);
+    auto * owner = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(packed->buffer));
+    if (owner && !ggml_backend_dev_supports_op(owner, scratch)) {
+        scratch->src[3] = ggml_cont(ctx, incoming);
+    }
+    if (!owner || !ggml_backend_dev_supports_op(owner, scratch)) {
+        throw std::runtime_error("Token32 gather is unavailable on the KV device");
+    }
+    auto * updated = ggml_vk_vplane_pack_v8(ctx, scratch, tiles, packed, layer.v);
+    if (!ggml_backend_dev_supports_op(owner, updated)) {
+        throw std::runtime_error("Token32 packing is unavailable on the KV device");
+    }
+    return ggml_view_3d(ctx, updated, packed->ne[0], n_kv / 32, 2, updated->nb[1], updated->nb[2], 0);
+}
+
+void llama_kv_cache::commit_vplane(uint32_t n_kv) {
+    vplane_recent = vplane_next;
+    vplane_incoming.clear();
+    vplane_dirty.erase(vplane_dirty.begin(), vplane_dirty.lower_bound(n_kv / 32));
 }
 
 uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
@@ -1409,6 +1619,93 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
     v_cur = ggml_reshape_2d(ctx, v_cur, 1, ggml_nelements(v_cur));
 
     return ggml_set_rows(ctx, v_view, v_cur, v_idxs);
+}
+
+void llama_kv_cache::set_input_tail(
+        ggml_tensor * indices, ggml_tensor * slots, const ggml_tensor * mask,
+        const llama_ubatch & ubatch, const slot_info & sinfo) {
+    GGML_ASSERT(has_tail() && sinfo.n_stream() == 1 && ubatch.n_tokens > 0 && ubatch.n_tokens <= tail_entries.size());
+    GGML_ASSERT(ggml_backend_buffer_is_host(indices->buffer) && ggml_backend_buffer_is_host(slots->buffer));
+    auto * writes = static_cast<int64_t *>(indices->data);
+    auto * map = static_cast<int32_t *>(slots->data);
+    const size_t n_kv = get_n_kv(sinfo);
+    const size_t slot_stride = slots->ne[0];
+    const bool tiled = slot_stride != n_kv;
+    GGML_ASSERT(!tiled || (vplane_enabled && slot_stride == n_kv + n_kv / 32));
+    const auto & cells = v_cells[0];
+    const int64_t first_query = *std::min_element(ubatch.pos, ubatch.pos + ubatch.n_tokens);
+    const int64_t expired = first_query - tail_tokens;
+
+    // A physical body row can be reused by SWA or after a suffix removal.
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        const uint32_t cell = sinfo.idxs[0][i];
+        for (auto & entry : tail_entries) {
+            if (entry.cell == cell) {
+                entry = {};
+            }
+        }
+    }
+
+    // Reuse discarded or expired slots before evicting rows visible to the first query.
+    uint32_t n_writes = 0;
+    for (size_t i = 0; i < tail_entries.size() && n_writes < ubatch.n_tokens; ++i) {
+        const size_t slot = (tail_cursor + i) % tail_entries.size();
+        const auto & entry = tail_entries[slot];
+        if (entry.pos < 0 || entry.pos <= expired) {
+            writes[n_writes++] = slot;
+        }
+    }
+    for (size_t i = 0; n_writes < ubatch.n_tokens; ++i) {
+        // Non-contiguous positions can span more than one tail window.
+        const size_t slot = (tail_cursor + i) % tail_entries.size();
+        if (tail_entries[slot].pos > expired && tail_entries[slot].pos >= 0) {
+            writes[n_writes++] = slot;
+        }
+    }
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        tail_entries[writes[i]] = { ubatch.pos[i], sinfo.idxs[0][i] };
+    }
+    tail_cursor = (writes[ubatch.n_tokens - 1] + 1) % tail_entries.size();
+
+    if (tiled) {
+        GGML_ASSERT(mask && mask->type == GGML_TYPE_F16 && ggml_is_contiguous(mask) &&
+                    mask->ne[0] == int64_t(n_kv) && mask->ne[1] == ubatch.n_tokens &&
+                    ggml_backend_buffer_is_host(mask->buffer));
+    }
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        auto * row = map + i * slot_stride;
+        std::fill_n(row, n_kv, -1);
+        if (tiled) {
+            const auto * mask_row = static_cast<const ggml_fp16_t *>(mask->data) + i * n_kv;
+            for (size_t tile = 0; tile < n_kv / 32; ++tile) {
+                row[n_kv + tile] = ggml_vk_vplane_tile_mask(mask_row + 32 * tile);
+            }
+        }
+        const int64_t query = ubatch.pos[i];
+        const llama_seq_id seq = ubatch.seq_id[i][0];
+        for (size_t slot = 0; slot < tail_entries.size(); ++slot) {
+            const auto & entry = tail_entries[slot];
+            if (entry.pos >= 0 && entry.pos <= query && entry.pos > query - tail_tokens &&
+                entry.cell < n_kv && !cells.is_empty(entry.cell) &&
+                cells.pos_get(entry.cell) == entry.pos && cells.seq_has(entry.cell, seq)) {
+                row[entry.cell] = static_cast<int32_t>(slot);
+                if (tiled) {
+                    row[n_kv + entry.cell / 32] |= GGML_VK_VPLANE_TILE_HAS_TAIL;
+                }
+            }
+        }
+    }
+}
+
+ggml_tensor * llama_kv_cache::store_tail(
+        ggml_context * ctx, ggml_tensor * cur, ggml_tensor * indices, int32_t il, bool key) const {
+    const auto & layer = layers[map_layer_ids.at(il)];
+    auto * tail = key ? layer.k_tail : layer.v_tail;
+    const int64_t d = cur->ne[0], heads = cur->ne[1];
+    GGML_ASSERT(ggml_row_size(cur->type, d) == cur->nb[1] && d * heads == tail->ne[0]);
+    auto * rows = ggml_view_2d(ctx, cur, d*heads, cur->ne[2], cur->nb[2], 0);
+    auto * written = ggml_set_rows(ctx, tail, rows, indices);
+    return ggml_view_3d(ctx, written, d, heads, written->ne[1], d * written->nb[0], written->nb[1], 0);
 }
 
 ggml_tensor * llama_kv_cache::build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const {
@@ -1927,6 +2224,7 @@ size_t llama_kv_cache::size_v_bytes() const {
 
     for (const auto & layer : layers) {
         size_v_bytes += layer.v ? ggml_nbytes(layer.v) : 0;
+        size_v_bytes += layer.vplane ? ggml_nbytes(layer.vplane) : 0;
     }
 
     return size_v_bytes;
@@ -2157,6 +2455,12 @@ const slot_info_vec_t *   sinfos_in) {
     // TODO: fix incosistent handling of `seq_id < 0` and `seq_id == -1` in the codebase [TAG_LLAMA_SEQ_ID_NEG]
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
 
+    if (has_tail()) {
+        std::fill(tail_entries.begin(), tail_entries.end(), tail_entry{});
+        tail_cursor = 0;
+        LLAMA_LOG_WARN("%s: restored state uses quantized history until the F16 tail refills\n", __func__);
+    }
+
     if (sinfos_out) {
         sinfos_out->assign(n_stream, slot_info{});
     }
@@ -2246,6 +2550,300 @@ void llama_kv_cache::state_write_meta(llama_io_write_i & io, const cell_ranges_t
     }
 }
 
+static size_t vplane_code_offset(uint32_t lane, uint32_t channel, int bits) {
+    const uint32_t time = lane / 4;
+    const uint32_t quad = (lane % 4) * 64 + channel / 4;
+    if (bits == 4) {
+        return 512 + quad * 16 + (channel % 4) * 4 + time / 2;
+    }
+    return 512 + quad * 32 + (time / 4) * 16 + (channel % 4) * 4 + time % 4;
+}
+
+static uint32_t vplane_state_version(int bits) {
+    return bits == 4 ? 0x56503401 : 0x56503801;
+}
+static constexpr size_t vplane_raw_tile_bytes = 32 * 512 * sizeof(ggml_fp16_t);
+
+static ggml_fp16_t vplane_dequant_lane(const uint8_t * bytes, uint32_t lane, uint32_t channel, int bits) {
+    ggml_fp16_t scale;
+    const auto offset = vplane_code_offset(lane, channel, bits);
+    std::memcpy(&scale, bytes + 2 * channel, sizeof(scale));
+    int code;
+    if (bits == 4) {
+        code = ((bytes[offset] >> (4 * ((lane / 4) % 2))) & 15) - 8;
+    } else {
+        int8_t signed_code;
+        std::memcpy(&signed_code, bytes + offset, sizeof(signed_code));
+        code = signed_code;
+    }
+    return ggml_fp32_to_fp16(ggml_fp16_to_fp32(scale) * code);
+}
+
+void llama_kv_cache::state_write_vplane(llama_io_write_i & io, const cell_ranges_t & cr) const {
+    const int32_t type = GGML_TYPE_I8;
+    const uint32_t version = vplane_state_version(vplane_bits);
+    const size_t tile_bytes = ggml_vk_vplane_tile_bytes(vplane_bits);
+    io.write(&type, sizeof(type));
+    io.write(&version, sizeof(version));
+
+    std::vector<uint32_t> tiles;
+    for (const auto & range : cr.data) {
+        for (uint32_t row = range.first; row < range.second; ++row) {
+            io.write(&row, sizeof(row));
+            const uint32_t tile = row / 32;
+            if (tiles.empty() || tiles.back() != tile) {
+                tiles.push_back(tile);
+            }
+        }
+    }
+    std::vector<vplane_recent_tile> raw;
+    for (const auto & item : vplane_recent) {
+        if (std::binary_search(tiles.begin(), tiles.end(), item.tile)) {
+            raw.push_back(item);
+        }
+    }
+    const uint32_t raw_count = raw.size();
+    io.write(&raw_count, sizeof(raw_count));
+    for (const auto & item : raw) {
+        io.write(&item.tile, sizeof(item.tile));
+    }
+    for (uint32_t tile : tiles) {
+        const uint8_t dirty = vplane_dirty.count(tile) != 0;
+        io.write(&dirty, sizeof(dirty));
+    }
+
+    for (const auto & layer : layers) {
+        if (io.is_counting()) {
+            io.write(nullptr, 2 * tiles.size() * tile_bytes + raw.size() * vplane_raw_tile_bytes);
+            continue;
+        }
+        std::vector<uint8_t> packed(ggml_nbytes(layer.vplane));
+        ggml_backend_tensor_get(layer.vplane, packed.data(), 0, packed.size());
+        for (uint32_t tile : tiles) {
+            for (uint32_t h = 0; h < 2; ++h) {
+                io.write(packed.data() + h * layer.vplane->nb[2] + tile * tile_bytes, tile_bytes);
+            }
+        }
+        if (!raw.empty()) {
+            std::vector<uint8_t> recent(ggml_nbytes(layer.v));
+            ggml_backend_tensor_get(layer.v, recent.data(), 0, recent.size());
+            for (const auto & item : raw) {
+                io.write(recent.data() + item.slot * vplane_raw_tile_bytes, vplane_raw_tile_bytes);
+            }
+        }
+    }
+}
+
+void llama_kv_cache::state_set_vplane_rows(
+        const kv_layer & layer, const std::vector<int32_t> & source_rows,
+        const std::vector<ggml_fp16_t> & values, const std::vector<vplane_recent_tile> & recent) const {
+    const auto quantize = ggml_get_type_traits(type_v())->from_float_ref;
+    const size_t tile_bytes = ggml_vk_vplane_tile_bytes(vplane_bits);
+    std::vector<uint8_t> packed(ggml_nbytes(layer.vplane), 0);
+    std::vector<ggml_fp16_t> raw(ggml_nelements(layer.v), 0);
+    for (size_t tile = 0; tile < source_rows.size() / 32; ++tile) {
+        const int32_t * rows = source_rows.data() + 32 * tile;
+        if (std::all_of(rows, rows + 32, [](int32_t row) { return row < 0; })) {
+            continue;
+        }
+        const int32_t slot = vplane_recent_slot(recent, tile);
+        if (slot >= 0) {
+            for (uint32_t lane = 0; lane < 32; ++lane) {
+                if (rows[lane] >= 0) {
+                    std::copy_n(values.data() + size_t(rows[lane]) * 512, 512,
+                                raw.data() + (slot * 32 + lane) * 512);
+                }
+            }
+        }
+        for (uint32_t h = 0; h < 2; ++h) {
+            auto * bytes = packed.data() + h * layer.vplane->nb[2] + tile * tile_bytes;
+            for (uint32_t d = 0; d < 256; ++d) {
+                float lanes[32];
+                uint8_t quant[34];
+                for (uint32_t lane = 0; lane < 32; ++lane) {
+                    lanes[lane] = rows[lane] < 0 ? 0.0f :
+                        ggml_fp16_to_fp32(values[size_t(rows[lane]) * 512 + h * 256 + d]);
+                }
+                quantize(lanes, quant, 32);
+                std::memcpy(bytes + 2 * d, quant, 2);
+                for (uint32_t lane = 0; lane < 32; ++lane) {
+                    const auto offset = vplane_code_offset(lane, d, vplane_bits);
+                    if (vplane_bits == 4) {
+                        const uint8_t code = (quant[2 + lane % 16] >> (4 * (lane / 16))) & 15;
+                        bytes[offset] |= code << (4 * ((lane / 4) % 2));
+                    } else {
+                        bytes[offset] = quant[2 + lane];
+                    }
+                }
+            }
+        }
+    }
+    ggml_backend_tensor_set(layer.vplane, packed.data(), 0, packed.size());
+    ggml_backend_tensor_set(layer.v, raw.data(), 0, raw.size() * sizeof(ggml_fp16_t));
+}
+
+bool llama_kv_cache::state_read_vplane(llama_io_read_i & io, const slot_info & sinfo) {
+    constexpr uint32_t max_rows = 131328;
+    const size_t tile_bytes = ggml_vk_vplane_tile_bytes(vplane_bits);
+    const size_t capacity = v_cells[0].size();
+    const auto & dst_rows = sinfo.idxs[0];
+    std::vector<int32_t> rows(capacity, -1);
+    std::vector<llama_pos> newest(capacity / 32, -1);
+    for (size_t i = 0; i < dst_rows.size(); ++i) {
+        const uint32_t row = dst_rows[i];
+        rows[row] = i;
+        newest[row / 32] = std::max(newest[row / 32], v_cells[0].pos_get(row));
+    }
+    std::vector<uint32_t> dst_tiles;
+    for (uint32_t tile = 0; tile < newest.size(); ++tile) {
+        if (newest[tile] >= 0) {
+            dst_tiles.push_back(tile);
+        }
+    }
+    std::sort(dst_tiles.begin(), dst_tiles.end(), [&](uint32_t a, uint32_t b) { return newest[a] < newest[b]; });
+    std::vector<vplane_recent_tile> recent;
+    const size_t recent_count = std::min<size_t>(vplane_recent_capacity, dst_tiles.size());
+    for (size_t i = dst_tiles.size() - recent_count; i < dst_tiles.size(); ++i) {
+        recent.push_back({dst_tiles[i], uint32_t(recent.size())});
+    }
+
+    int32_t type;
+    io.read(&type, sizeof(type));
+    vplane_dirty.clear();
+    if (type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> values(dst_rows.size() * 512);
+        for (size_t i = 0; i < layers.size(); ++i) {
+            uint64_t row_bytes;
+            if (i != 0) {
+                io.read(&type, sizeof(type));
+            }
+            io.read(&row_bytes, sizeof(row_bytes));
+            if (type != GGML_TYPE_F16 || row_bytes != 512 * sizeof(ggml_fp16_t)) {
+                return false;
+            }
+            io.read(values.data(), values.size() * sizeof(ggml_fp16_t));
+            state_set_vplane_rows(layers[i], rows, values, recent);
+        }
+    } else if (type == GGML_TYPE_I8) {
+        uint32_t version;
+        io.read(&version, sizeof(version));
+        if (version != vplane_state_version(vplane_bits)) {
+            return false;
+        }
+        std::vector<uint32_t> src_rows(dst_rows.size());
+        io.read(src_rows.data(), src_rows.size() * sizeof(uint32_t));
+        std::vector<int32_t> ordinal(max_rows / 32, -1);
+        std::vector<uint32_t> tiles;
+        for (size_t i = 0; i < src_rows.size(); ++i) {
+            const uint32_t row = src_rows[i];
+            if (row >= max_rows || (i != 0 && row <= src_rows[i - 1])) {
+                return false;
+            }
+            if (ordinal[row / 32] < 0) {
+                ordinal[row / 32] = tiles.size();
+                tiles.push_back(row / 32);
+            }
+        }
+        uint32_t raw_count;
+        io.read(&raw_count, sizeof(raw_count));
+        if (raw_count > 8 || raw_count > tiles.size()) {
+            return false;
+        }
+        std::vector<uint32_t> raw_tiles(raw_count);
+        if (!raw_tiles.empty()) {
+            io.read(raw_tiles.data(), raw_tiles.size() * sizeof(uint32_t));
+        }
+        std::vector<uint8_t> dirty(tiles.size());
+        io.read(dirty.data(), dirty.size());
+        std::vector<int32_t> raw_slot(tiles.size(), -1);
+        for (uint32_t i = 0; i < raw_count; ++i) {
+            if (raw_tiles[i] >= ordinal.size()) {
+                return false;
+            }
+            const auto tile = ordinal[raw_tiles[i]];
+            if (tile < 0 || raw_slot[tile] >= 0) {
+                return false;
+            }
+            raw_slot[tile] = i;
+        }
+
+        std::vector<int32_t> remap(tiles.size(), -1);
+        std::vector<int32_t> owner(capacity / 32, -1);
+        bool same_groups = raw_count <= vplane_recent_capacity;
+        for (size_t i = 0; i < src_rows.size() && same_groups; ++i) {
+            const uint32_t from = src_rows[i], to = dst_rows[i];
+            const int32_t src_tile = ordinal[from / 32];
+            const int32_t dst_tile = to / 32;
+            same_groups = from % 32 == to % 32 &&
+                (remap[src_tile] < 0 || remap[src_tile] == dst_tile) &&
+                (owner[dst_tile] < 0 || owner[dst_tile] == src_tile);
+            remap[src_tile] = dst_tile;
+            owner[dst_tile] = src_tile;
+        }
+        if (same_groups) {
+            recent.clear();
+            for (uint32_t i = 0; i < raw_count; ++i) {
+                recent.push_back({uint32_t(remap[ordinal[raw_tiles[i]]]), i});
+            }
+            for (size_t i = 0; i < tiles.size(); ++i) {
+                if (dirty[i]) {
+                    vplane_dirty.insert(remap[i]);
+                }
+            }
+        }
+
+        std::vector<uint8_t> packed(2 * tiles.size() * tile_bytes);
+        std::vector<ggml_fp16_t> raw(size_t(raw_count) * 32 * 512);
+        std::vector<ggml_fp16_t> values;
+        if (!same_groups) {
+            values.resize(dst_rows.size() * 512);
+        }
+        for (const auto & layer : layers) {
+            io.read(packed.data(), packed.size());
+            if (!raw.empty()) {
+                io.read(raw.data(), raw.size() * sizeof(ggml_fp16_t));
+            }
+            if (same_groups) {
+                std::vector<uint8_t> mapped(ggml_nbytes(layer.vplane), 0);
+                for (size_t i = 0; i < tiles.size(); ++i) {
+                    for (uint32_t h = 0; h < 2; ++h) {
+                        std::memcpy(mapped.data() + h * layer.vplane->nb[2] + remap[i] * tile_bytes,
+                                    packed.data() + (2 * i + h) * tile_bytes, tile_bytes);
+                    }
+                }
+                ggml_backend_tensor_set(layer.vplane, mapped.data(), 0, mapped.size());
+                if (!raw.empty()) {
+                    ggml_backend_tensor_set(layer.v, raw.data(), 0, raw.size() * sizeof(ggml_fp16_t));
+                }
+            } else {
+                for (size_t i = 0; i < src_rows.size(); ++i) {
+                    const uint32_t lane = src_rows[i] % 32;
+                    const int32_t tile = ordinal[src_rows[i] / 32];
+                    auto * out = values.data() + i * 512;
+                    if (raw_slot[tile] >= 0) {
+                        std::copy_n(raw.data() + (32 * raw_slot[tile] + lane) * 512, 512, out);
+                        continue;
+                    }
+                    for (uint32_t h = 0; h < 2; ++h) {
+                        const auto * bytes = packed.data() + (2 * tile + h) * tile_bytes;
+                        for (uint32_t d = 0; d < 256; ++d) {
+                            out[h * 256 + d] = vplane_dequant_lane(bytes, lane, d, vplane_bits);
+                        }
+                    }
+                }
+                state_set_vplane_rows(layer, rows, values, recent);
+            }
+        }
+    } else {
+        return false;
+    }
+
+    vplane_recent = std::move(recent);
+    vplane_next = vplane_recent;
+    vplane_incoming.clear();
+    return true;
+}
+
 void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const {
     const auto & cells = v_cells[cr.strm];
 
@@ -2280,6 +2878,11 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
             const size_t buf_size = range_size * k_size_row;
             io.write_tensor(k, range.first * k_size_row, buf_size);
         }
+    }
+
+    if (vplane_enabled) {
+        state_write_vplane(io, cr);
+        return;
     }
 
     if (!v_trans) {
@@ -2612,6 +3215,10 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
         }
     }
 
+    if (vplane_enabled) {
+        return state_read_vplane(io, sinfo);
+    }
+
     if (!this->v_trans) {
         for (const auto & layer : layers) {
             const uint32_t il = layer.il;
@@ -2864,6 +3471,9 @@ bool llama_kv_cache_context::apply() {
 
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
     n_kv = kv->get_n_kv(sinfos[i_cur]);
+    if (kv->has_vplane()) {
+        kv->mark_vplane_writes(sinfos[i_cur]);
+    }
 
     return true;
 }
@@ -2882,8 +3492,43 @@ uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
 }
 
+bool llama_kv_cache_context::has_tail() const {
+    return kv->has_tail();
+}
+
+bool llama_kv_cache_context::has_vplane() const {
+    return kv->has_vplane();
+}
+
+void llama_kv_cache_context::set_input_tail(ggml_tensor * indices, ggml_tensor * slots, const ggml_tensor * mask,
+                                          const llama_ubatch & ubatch) const {
+    kv->set_input_tail(indices, slots, mask, ubatch, sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::store_tail(
+        ggml_context * ctx, ggml_tensor * cur, ggml_tensor * indices, int32_t il, bool key) const {
+    return kv->store_tail(ctx, cur, indices, il, key);
+}
+
 ggml_type llama_kv_cache_context::type_k() const {
     return kv->type_k();
+}
+
+uint32_t llama_kv_cache_context::vplane_input_count() const {
+    return kv->vplane_input_count(n_kv);
+}
+
+void llama_kv_cache_context::set_input_vplane(ggml_tensor * dst, ggml_tensor * map, const ggml_tensor * mask) const {
+    kv->set_input_vplane(dst, map, mask, n_kv);
+}
+
+ggml_tensor * llama_kv_cache_context::pack_vplane(
+        ggml_context * ctx, ggml_tensor * incoming, ggml_tensor * tiles, int32_t il, ggml_tensor *& scratch) const {
+    return kv->pack_vplane(ctx, incoming, tiles, il, n_kv, scratch);
+}
+
+void llama_kv_cache_context::commit_vplane() const {
+    kv->commit_vplane(n_kv);
 }
 
 ggml_type llama_kv_cache_context::type_v() const {

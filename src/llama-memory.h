@@ -31,6 +31,8 @@ struct llama_memory_params {
 
     // only simulate the memory allocations
     bool no_alloc;
+    uint32_t kv_tail_tokens = 0;
+    bool kv_v_token32 = false;
 };
 
 // the tensor contexts and backend buffers of a memory instance

@@ -559,6 +559,15 @@ public:
     ggml_tensor * self_k_rot_swa = nullptr;
     ggml_tensor * self_v_rot_swa = nullptr;
 
+    ggml_tensor * self_tail_indices = nullptr;
+    ggml_tensor * self_tail_slots = nullptr;
+    ggml_tensor * self_tail_indices_swa = nullptr;
+    ggml_tensor * self_tail_slots_swa = nullptr;
+    ggml_tensor * self_vplane_tiles = nullptr;
+    ggml_tensor * self_vplane_tiles_swa = nullptr;
+    ggml_tensor * self_vplane_map = nullptr;
+    ggml_tensor * self_vplane_map_swa = nullptr;
+
     const llama_hparams hparams;
     const llama_cparams cparams;
 
@@ -1297,7 +1306,13 @@ struct llm_graph_context {
             ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
                 int64_t   n_kv_max,
                   float   kq_scale,
-                    int   il) const;
+                    int   il,
+            ggml_tensor * k_tail = nullptr,
+            ggml_tensor * v_tail = nullptr,
+            ggml_tensor * tail_slots = nullptr,
+            ggml_tensor * vplane = nullptr,
+            ggml_tensor * vplane_scratch = nullptr,
+            ggml_tensor * vplane_map = nullptr) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 

@@ -1,0 +1,82 @@
+#version 450
+
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const bool COMPACT = false;
+layout(constant_id = 1) const bool Q4 = false;
+const uint TILE_WORDS = Q4 ? 1152u : 2176u;
+layout(binding = 0, std430) readonly buffer Values { uint values[]; };
+layout(binding = 1, std430) readonly buffer Tiles { int tiles[]; };
+layout(binding = 2, std430) writeonly buffer Packed { uint packed[]; };
+layout(binding = 3, std430) writeonly buffer Recent { uint recent[]; };
+
+layout(push_constant) uniform Params {
+    uint head_stride;
+    uint recent_tiles;
+} p;
+
+void main() {
+    const uint index = gl_WorkGroupID.y;
+    const uint record = index * (COMPACT ? 36u : 2u);
+    const ivec2 tile = ivec2(tiles[record], tiles[record + 1u]);
+    if (tile.x < 0 || uint(tile.x) >= p.head_stride / TILE_WORDS) {
+        return;
+    }
+    const uint head = gl_WorkGroupID.z;
+    const uint pair = gl_LocalInvocationID.x;
+    const uint src = (COMPACT ? index : uint(tile.x)) * 32u * 256u + head * 128u + pair;
+    const int recent_slot = COMPACT ? tiles[record + 3u] : -1;
+    const uint dst = head * p.head_stride + uint(tile.x) * TILE_WORDS;
+    vec2 rows[32];
+    vec2 maximum = vec2(0.0);
+    vec2 signed_max = vec2(0.0);
+    for (uint i = 0; i < 32u; ++i) {
+        const bool valid = (uint(tile.y) & (1u << i)) != 0u;
+        const uint value = valid ? values[src + i * 256u] : 0u;
+        rows[i] = unpackHalf2x16(value);
+        if (recent_slot >= 0 && uint(recent_slot) < p.recent_tiles) {
+            recent[(uint(recent_slot) * 32u + i) * 256u + head * 128u + pair] = value;
+        }
+        const vec2 magnitude = abs(rows[i]);
+        if (Q4) {
+            signed_max = mix(signed_max, rows[i], greaterThan(magnitude, maximum));
+        }
+        maximum = max(maximum, magnitude);
+    }
+    const uint column = pair * 2u;
+    if (Q4) {
+        const vec2 scale = signed_max / -8.0;
+        const vec2 inv = mix(vec2(0.0), 1.0 / scale, notEqual(scale, vec2(0.0)));
+        packed[dst + pair] = packHalf2x16(scale);
+        for (uint group = 0; group < 4u; ++group) {
+            uvec2 word = uvec2(0);
+            for (uint i = 0; i < 8u; ++i) {
+                precise vec2 biased = rows[group + 4u * i] * inv + 8.5;
+                const uvec2 code = uvec2(clamp(biased, 0.0, 15.0));
+                word |= code << (4u * i);
+            }
+            const uint offset = dst + 128u + (group * 64u + column / 4u) * 4u + column % 4u;
+            packed[offset] = word.x;
+            packed[offset + 1u] = word.y;
+        }
+        return;
+    }
+    const vec2 scale = maximum / 127.0;
+    const vec2 inv = mix(1.0 / max(scale, vec2(1e-30)), vec2(0.0), equal(maximum, vec2(0.0)));
+    packed[dst + pair] = packHalf2x16(scale);
+
+    for (uint group = 0; group < 4u; ++group) {
+        for (uint quad = 0; quad < 2u; ++quad) {
+            uvec2 word = uvec2(0);
+            for (uint lane = 0; lane < 4u; ++lane) {
+                const vec2 scaled = rows[group + 4u * (quad * 4u + lane)] * inv;
+                vec2 integer_part;
+                const vec2 fraction = modf(abs(scaled), integer_part);
+                const ivec2 code = ivec2(sign(scaled) * (integer_part + mix(vec2(0.0), vec2(1.0), greaterThanEqual(fraction, vec2(0.5)))));
+                word |= (uvec2(code) & 255u) << (8u * lane);
+            }
+            const uint offset = dst + 128u + (group * 64u + column / 4u) * 8u + quad * 4u + column % 4u;
+            packed[offset] = word.x;
+            packed[offset + 1u] = word.y;
+        }
+    }
+}

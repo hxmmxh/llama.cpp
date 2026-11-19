@@ -440,6 +440,11 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
     }
 
     switch (op->op) {
+        case GGML_OP_FLASH_ATTN_EXT_TAIL:
+            return op->src[2] && op->src[2]->type != GGML_TYPE_I8;
+        case GGML_OP_VPLANE_PACK_V8:
+        case GGML_OP_VPLANE_GATHER_V8:
+            return false;
         case GGML_OP_CPY:
         case GGML_OP_SET_ROWS:
             return

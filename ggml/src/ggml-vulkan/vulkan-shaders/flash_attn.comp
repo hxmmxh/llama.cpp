@@ -57,6 +57,8 @@ shared FLOAT_TYPEV4 Qf[Br * qf_stride];
 
 const uint32_t qf_stride = HSK / 32;
 shared block_b_cache Qf[Br * qf_stride];
+const bool PV_PLANE_TAIL = (Flags & 4096u) != 0;
+shared vec4 Qf_tail[PV_PLANE_TAIL ? Br * (HSK / 4) : 1];
 #endif
 
 #ifndef MMQ
@@ -82,6 +84,14 @@ shared vec4 occupancy_limiter[LIMIT_OCCUPANCY_SHMEM > 0 ? LIMIT_OCCUPANCY_SHMEM 
 const bool PV_PLANE = (Flags & 128u) != 0;
 const bool PV_PLANE_INTEGER = (Flags & 256u) != 0;
 const bool PV_PLANE_Q4 = (Flags & 512u) != 0;
+const bool PV_PLANE_MASKED_F16 = (Flags & 1024u) != 0;
+const bool PV_PLANE_F16_TILE_MAP = (Flags & 2048u) != 0;
+const bool PV_PLANE_MASK_TILES = (Flags & 32768u) != 0;
+layout (binding = 8) readonly buffer VPLANE_MAP {int vplane_map[];};
+layout (binding = 7) readonly buffer VPLANE_F16 {f16vec4 data_vplane_f16[];};
+layout (binding = 9) readonly buffer VPLANE_K_TAIL {f16vec4 data_k_tail[];};
+layout (binding = 10) readonly buffer VPLANE_V_TAIL {f16vec4 data_v_tail[];};
+layout (binding = 11) readonly buffer VPLANE_TAIL_SLOTS {int tail_slots[];};
 layout (binding = 2) readonly buffer VTIME64 {uvec2 data_vtime64[];};
 layout (binding = 2) readonly buffer VTIME128 {uvec4 data_vtime128[];};
 layout (binding = 2) readonly buffer VTIMEHV4 {f16vec4 data_vtime_hv4[];};
@@ -98,6 +108,17 @@ uvec4 q4_nibbles_to_i8(uvec4 packed) {
         ((packed & uvec4(3840)) << 8) | ((packed & uvec4(61440)) << 12);
     // Each byte is in [0,15], so adding 120 cannot carry into its neighbor.
     return (spread + uvec4(0x78787878u)) ^ uvec4(0x80808080u);
+}
+
+FLOAT_TYPEV4 vplane_value(uint chunk_byte, uint quad, uint column, uint c) {
+    const FLOAT_TYPEV4 scale = FLOAT_TYPEV4(data_vtime_hv4[chunk_byte / 8 + quad]);
+    if (PV_PLANE_Q4) {
+        const uvec4 packed = vplane_q4_load(chunk_byte, quad, column);
+        return scale * FLOAT_TYPEV4(ivec4((packed >> (4u * c)) & uvec4(15)) - 8);
+    }
+    const uint index = (chunk_byte + 512u) / 16u + (column * 64u + quad) * (cols_per_thread / 4u) + c / 4u;
+    const ivec4 data = ivec4(data_vtime128[index]);
+    return scale * FLOAT_TYPEV4(bitfieldExtract(data, int(8u * (c % 4u)), 8));
 }
 
 #endif
@@ -146,6 +167,9 @@ void main() {
         const uint buf_iqs = d % 8;
 
         vec4 vals = is_in_bounds ? data_qv4[q_offset / 4 + (i * Br + r) * q_stride / 4 + d] * p.scale : vec4(0.0f);
+        if (PV_PLANE_TAIL && r < Br) {
+            Qf_tail[r * (HSK / 4) + d] = vals;
+        }
         const vec4 abs_vals = abs(vals);
 
         const float thread_max = max(max(abs_vals.x, abs_vals.y), max(abs_vals.z, abs_vals.w));
@@ -217,12 +241,26 @@ void main() {
 
     [[dont_unroll]]
     for (uint32_t j = start_j; j < end_j; ++j) {
+        bool use_f16_v = false;
+#ifdef MMQ
+        int f16_slot = -1;
+        const uint tail_base = gqa_iq1 * (KV + KV / 32u);
+        const uint tile_flags = PV_PLANE_TAIL ? uint(tail_slots[tail_base + KV + j]) : 0;
+        const bool tail_block = (tile_flags & 1u) != 0;
+#endif
         if (MASK_ENABLE) {
             if (USE_MASK_OPT && mask_opt_idx != j / 16) {
                 mask_opt_idx = j / 16;
                 mask_opt = data_mask_opt[mo_offset + mask_opt_idx];
             }
             mask_opt_bits = (mask_opt >> ((j % 16) * 2)) & 0x3;
+#ifdef MMQ
+            if (PV_PLANE_TAIL) {
+                mask_opt_bits = tile_flags >> 1;
+            } else if (PV_PLANE_MASK_TILES) {
+                mask_opt_bits = uint(vplane_map[(1u + gqa_iq1) * (KV / 32u) + j]) >> 1;
+            }
+#endif
             if (mask_opt_bits == MASK_OPT_ALL_NEG_INF) {
                 // skip this block
                 continue;
@@ -232,6 +270,9 @@ void main() {
                 bool nem1_bounds_check = !(p.gqa_ratio > 1) && (p.nem1 % Br) != 0;
 
                 float max_mask = NEG_FLT_MAX_OVER_2;
+#ifdef MMQ
+                bool zero_mask = true;
+#endif
                 barrier();
                 [[unroll]] for (uint32_t idx = 0; idx < Bc * Br; idx += gl_WorkGroupSize.x) {
                     uint32_t c = (idx + tid) % Bc;
@@ -243,6 +284,9 @@ void main() {
                             FLOAT_TYPE m = FLOAT_TYPE(data_m[m_offset + (i * Br + r) * m_stride + kcol]);
                             masksh[c * masksh_stride + r] = m;
                             max_mask = max(max_mask, float(m));
+#ifdef MMQ
+                            zero_mask = zero_mask && m == FLOAT_TYPE(0);
+#endif
                         } else {
                             masksh[c * masksh_stride + r] = USE_SPARSE ? FLOAT_TYPE(NEG_FLT_MAX_OVER_2) : FLOAT_TYPE(0);
                         }
@@ -250,13 +294,22 @@ void main() {
                 }
                 // skip the block if the mask is entirely -inf
                 bool all_less = subgroupAll(max_mask <= NEG_FLT_MAX_OVER_2);
+                float subgroup_mask = all_less ? NEG_FLT_MAX_OVER_2 : 0.0f;
+#ifdef MMQ
+                if (PV_PLANE_MASKED_F16 && subgroupAll(zero_mask)) {
+                    subgroup_mask = 1.0f;
+                }
+#endif
                 barrier();
                 if (gl_SubgroupInvocationID == 0) {
-                    tmpsh[gl_SubgroupID] = all_less ? NEG_FLT_MAX_OVER_2 : 0.0f;
+                    tmpsh[gl_SubgroupID] = subgroup_mask;
                 }
                 barrier();
                 [[unroll]] for (uint s = 0; s < gl_NumSubgroups; ++s) {
                     max_mask = max(max_mask, tmpsh[s]);
+#ifdef MMQ
+                    use_f16_v = use_f16_v || (PV_PLANE_MASKED_F16 && tmpsh[s] != 1.0f);
+#endif
                 }
                 if (max_mask <= NEG_FLT_MAX_OVER_2) {
                     continue;
@@ -264,6 +317,12 @@ void main() {
             }
         }
 
+#ifdef MMQ
+        if (PV_PLANE_F16_TILE_MAP && (use_f16_v || PV_PLANE_TAIL)) {
+            f16_slot = vplane_map[j];
+            use_f16_v = f16_slot >= 0;
+        }
+#endif
         ACC_TYPE Sf[rows_per_thread][cols_per_thread];
         [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
             [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
@@ -385,6 +444,20 @@ void main() {
         [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
             uint32_t kcol;
             if (!fa_kv_index(j * Bc + c * cols_per_iter + col_tid, kcol)) {
+                continue;
+            }
+
+            const int exact_slot = tail_block ? tail_slots[tail_base + kcol] : -1;
+            if (exact_slot >= 0 && uint(exact_slot) < data_k_tail.length() / (2u * HSK / 4u)) {
+                const uint base = (uint(exact_slot) * 2u + ik2) * (HSK / 4) + d_tid * hsk4;
+                [[unroll]] for (uint r = 0; r < rows_per_thread; ++r) {
+                    ACC_TYPE score = ACC_TYPE(0.0f);
+                    [[unroll]] for (uint d = 0; d < hsk4; ++d) {
+                        score += ACC_TYPE(dot(Qf_tail[tile_row(r) * (HSK / 4) + d_tid * hsk4 + d],
+                                              vec4(data_k_tail[base + d])));
+                    }
+                    Sf[r][c] = score;
+                }
                 continue;
             }
 
@@ -536,7 +609,7 @@ void main() {
         }
 
 #ifdef MMQ
-        if (PV_PLANE && !PV_PLANE_INTEGER) {
+        if (PV_PLANE && !use_f16_v && !tail_block && !PV_PLANE_INTEGER) {
             const uint pv_words = cols_per_thread / 4;
             FLOAT_TYPE probabilities[rows_per_thread][cols_per_thread];
             [[unroll]] for (uint r = 0; r < rows_per_thread; ++r) {
@@ -571,7 +644,7 @@ void main() {
                     }
                 }
             }
-        } else if (PV_PLANE) {
+        } else if (PV_PLANE && !use_f16_v && !tail_block) {
             const uint pv_words = cols_per_thread / 4;
             uint packed_p[rows_per_thread][2];
             float p_scale[rows_per_thread];
@@ -629,6 +702,9 @@ void main() {
                     continue;
                 }
 
+#ifdef MMQ
+                const int exact_slot = tail_block ? tail_slots[tail_base + vcol] : -1;
+#endif
                 FLOAT_TYPE Pf[rows_per_thread];
                 [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
                     Pf[r] = FLOAT_TYPE(exp(float(Sf[r][c]) - Mf[r]));
@@ -637,6 +713,19 @@ void main() {
 
                 [[unroll]] for (uint32_t d = 0; d < HSV_per_thread / 4; ++d) {
                     FLOAT_TYPEV4 Vf;
+#ifdef MMQ
+                    if (exact_slot >= 0 && uint(exact_slot) < data_v_tail.length() / (2u * HSV / 4u)) {
+                        const uint index = (uint(exact_slot) * 2u + iv2) * (HSV / 4) + d * D_split + d_tid;
+                        Vf = FLOAT_TYPEV4(data_v_tail[index]);
+                    } else if (use_f16_v) {
+                        const uint row = PV_PLANE_F16_TILE_MAP ? uint(f16_slot) * 32u + vcol % 32u : vcol;
+                        const uint index = (2 * row + iv2) * (HSV / 4) + d * D_split + d_tid;
+                        Vf = FLOAT_TYPEV4(data_vplane_f16[index]);
+                    } else if (tail_block) {
+                        const uint chunk_byte = (v_offset + j * HSV) * (PV_PLANE_Q4 ? 18 : 34);
+                        Vf = vplane_value(chunk_byte, d * D_split + d_tid, col_tid, c);
+                    } else
+#endif
                     if (SHMEM_STAGING != 0) {
                         Vf = kvsh[(c * cols_per_iter + col_tid) * kvsh_stride + (d * D_split + d_tid)];
                     } else if (USE_DECODE_V) {

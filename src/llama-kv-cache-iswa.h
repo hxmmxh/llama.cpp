@@ -30,7 +30,9 @@ public:
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
                     ggml_type   type_k_swa = GGML_TYPE_COUNT,
-                    ggml_type   type_v_swa = GGML_TYPE_COUNT);
+                    ggml_type   type_v_swa = GGML_TYPE_COUNT,
+                     uint32_t   kv_tail_tokens = 0,
+                         bool   kv_v_token32 = false);
 
     llama_kv_cache_iswa(
             const llama_model & model,
@@ -50,7 +52,9 @@ public:
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
                     ggml_type   type_k_swa = GGML_TYPE_COUNT,
-                    ggml_type   type_v_swa = GGML_TYPE_COUNT);
+                    ggml_type   type_v_swa = GGML_TYPE_COUNT,
+                     uint32_t   kv_tail_tokens = 0,
+                         bool   kv_v_token32 = false);
 
     ~llama_kv_cache_iswa() = default;
 

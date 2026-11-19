@@ -9239,6 +9239,60 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+struct test_flash_attn_ext_tail : public test_flash_attn_ext {
+    const int64_t tail;
+
+    test_flash_attn_ext_tail(int64_t dim, int64_t kv, int64_t queries, int64_t tail,
+                            ggml_type type_k, ggml_type type_v, bool bias_and_sinks)
+        : test_flash_attn_ext(dim, dim, 2, {4, 1}, kv, queries, true, bias_and_sinks,
+                             bias_and_sinks ? 4.0f : 0.0f, bias_and_sinks ? 12.0f : 0.0f,
+                             GGML_PREC_F32, type_k, type_v, {0, 2, 1, 3}), tail(tail) {}
+
+    std::string vars() override {
+        return test_flash_attn_ext::vars() + ",tail=" + std::to_string(tail);
+    }
+
+    double max_nmse_err() override { return 1e-7; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        auto * fa = test_flash_attn_ext::build_graph(ctx);
+        auto * kt = ggml_permute(ctx, ggml_new_tensor_3d(ctx, GGML_TYPE_F16, hsk, nh, tail), 0, 2, 1, 3);
+        auto * vt = ggml_permute(ctx, ggml_new_tensor_3d(ctx, GGML_TYPE_F16, hsv, nh, tail), 0, 2, 1, 3);
+        auto * slots = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, kv, nb);
+        ggml_set_name(slots, "tail_slots");
+        auto * out = ggml_flash_attn_ext_tail(ctx, fa->src[0], fa->src[1], fa->src[2], fa->src[3],
+                                               kt, vt, slots, 1.0f/sqrtf(hsk), max_bias, logit_softcap);
+        ggml_flash_attn_ext_add_sinks(out, fa->src[4]);
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_flash_attn_ext::initialize_tensors(ctx);
+        std::vector<int32_t> slots(kv*nb, -1);
+        std::vector<ggml_fp16_t> mask(kv*nb, ggml_fp32_to_fp16(-INFINITY));
+        for (int64_t i = 0; i < nb; ++i) {
+            const int64_t end = kv - nb + i + 1;
+            for (int64_t j = 0; j < end; ++j) {
+                if (j % 5 != 0 || j == end - 1) {
+                    mask[i*kv + j] = ggml_fp32_to_fp16(max_bias > 0 ? float(j - end) * 0.02f : 0.0f);
+                }
+                if (j >= end - tail) {
+                    slots[i*kv + j] = int32_t((j + 2) % tail);
+                }
+            }
+        }
+        if (nb > 1) {
+            // An empty query must produce zeros, including with attention sinks.
+            std::fill_n(mask.begin(), kv, ggml_fp32_to_fp16(-INFINITY));
+        }
+        if (tail < kv) {
+            slots[kv - 1] = int32_t(tail);
+        }
+        ggml_backend_tensor_set(ggml_get_tensor(ctx, "m"), mask.data(), 0, mask.size()*sizeof(mask[0]));
+        ggml_backend_tensor_set(ggml_get_tensor(ctx, "tail_slots"), slots.data(), 0, slots.size()*sizeof(slots[0]));
+    }
+};
+
 // large Q values, so the online softmax has to rescale the partial results
 struct test_flash_attn_ext_large_logits : public test_flash_attn_ext {
     static constexpr int q_range = 20;
@@ -12861,6 +12915,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+    test_cases.emplace_back(new test_flash_attn_ext_tail(128, 37, 1, 5, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0, false));
+    test_cases.emplace_back(new test_flash_attn_ext_tail(256, 513, 4, 32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0, true));
+    test_cases.emplace_back(new test_flash_attn_ext_tail(256, 1025, 3, 1024, GGML_TYPE_Q4_1, GGML_TYPE_Q8_0, false));
+    test_cases.emplace_back(new test_flash_attn_ext_tail(512, 63, 7, 63, GGML_TYPE_Q8_0, GGML_TYPE_Q4_1, true));
     test_cases.emplace_back(new test_flash_attn_ext_large_logits(256, 256, 4, {4, 1}, 513, 4, true, true, 8.0f, 30.0f,
         GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 
