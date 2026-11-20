@@ -17,6 +17,26 @@
 static void test(void) {
     common_params params;
 
+    {
+        common_params kv_params;
+        kv_params.cache_type_k = GGML_TYPE_Q8_0;
+        kv_params.cache_type_v = GGML_TYPE_Q8_0;
+        const auto context = common_context_params_to_llama(kv_params);
+        assert(context.kv_v_token32);
+        assert(context.type_k == GGML_TYPE_Q8_0 && context.type_v == GGML_TYPE_Q8_0);
+        assert(context.type_k_swa == GGML_TYPE_F16 && context.type_v_swa == GGML_TYPE_F16);
+        const auto draft = common_base_params_to_speculative(kv_params);
+        assert(!draft.kv_v_token32);
+        assert(draft.cache_type_k == GGML_TYPE_F16 && draft.cache_type_v == GGML_TYPE_F16);
+
+        const char * disable[] = {"test", "-m", "test.gguf", "--no-kv-v-token32"};
+        assert(common_params_parse(4, const_cast<char **>(disable), kv_params, LLAMA_EXAMPLE_COMMON));
+        assert(!common_context_params_to_llama(kv_params).kv_v_token32);
+        const char * enable[] = {"test", "-m", "test.gguf", "--kv-v-token32", "--cache-type-k-swa", "q8_0"};
+        assert(common_params_parse(6, const_cast<char **>(enable), kv_params, LLAMA_EXAMPLE_COMMON));
+        assert(kv_params.kv_v_token32 && kv_params.cache_type_k_swa == GGML_TYPE_Q8_0);
+    }
+
     auto assert_output_limits = [](int32_t n_batch, int32_t n_parallel, int32_t n_draft,
                                    int32_t total, int32_t per_seq) {
         const auto limits = common_speculative_get_output_limits(n_batch, n_parallel, n_draft);

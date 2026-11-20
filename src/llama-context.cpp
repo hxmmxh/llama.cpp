@@ -487,6 +487,27 @@ llama_context::llama_context(
 
     // init the memory module
     if (!hparams.vocab_only) {
+        const auto type_k_swa = params.type_k_swa == GGML_TYPE_COUNT ? params.type_k : params.type_k_swa;
+        const auto type_v_swa = params.type_v_swa == GGML_TYPE_COUNT ? params.type_v : params.type_v_swa;
+        const bool token32_swa_supported = (type_k_swa == params.type_k && type_v_swa == params.type_v) ||
+            (type_k_swa == GGML_TYPE_F16 && type_v_swa == GGML_TYPE_F16);
+        params.kv_v_token32 = params.kv_v_token32 && model.arch == LLM_ARCH_SPARK2_5 &&
+            hparams.swa_type != LLAMA_SWA_TYPE_NONE && cparams.n_seq_max == 1 &&
+            cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT && !cparams.ctx_other &&
+            cparams.causal_attn && cparams.offload_kqv && cparams.flash_attn &&
+            params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_ENABLED &&
+            (params.type_k == GGML_TYPE_Q8_0 || params.type_k == GGML_TYPE_Q4_0) &&
+            params.type_k == params.type_v && token32_swa_supported;
+        for (uint32_t il = 0; params.kv_v_token32 && il < hparams.n_layer(); ++il) {
+            if (hparams.is_swa(il)) {
+                continue;
+            }
+            auto * dev = model.dev_layer(il);
+            params.kv_v_token32 = std::strncmp(ggml_backend_dev_name(dev), "Vulkan", 6) == 0 &&
+                std::strstr(ggml_backend_dev_description(dev), "140T") &&
+                hparams.n_embd_head_k(il) == 256 && hparams.n_embd_head_v(il) == 256 &&
+                hparams.n_head(il) == 8 && hparams.n_head_kv(il) == 2;
+        }
         llama_memory_params params_mem = {
             /*.type_k    =*/ params.type_k,
             /*.type_v    =*/ params.type_v,
@@ -510,21 +531,6 @@ llama_context::llama_context(
             if (params.kv_tail_tokens > INT32_MAX) {
                 throw std::runtime_error("KV precision tail length exceeds INT32_MAX");
             }
-        }
-        const auto type_k_swa = params.type_k_swa == GGML_TYPE_COUNT ? params.type_k : params.type_k_swa;
-        const auto type_v_swa = params.type_v_swa == GGML_TYPE_COUNT ? params.type_v : params.type_v_swa;
-        const bool token32_swa_supported = (type_k_swa == params.type_k && type_v_swa == params.type_v) ||
-            (type_k_swa == GGML_TYPE_F16 && type_v_swa == GGML_TYPE_F16);
-        if (params.kv_v_token32 &&
-            (model.arch != LLM_ARCH_SPARK2_5 || hparams.swa_type == LLAMA_SWA_TYPE_NONE ||
-             cparams.n_seq_max != 1 || cparams.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT || cparams.ctx_other ||
-             !cparams.causal_attn || !cparams.offload_kqv || !cparams.flash_attn ||
-             params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED ||
-             (params.type_k != GGML_TYPE_Q8_0 && params.type_k != GGML_TYPE_Q4_0) || params.type_k != params.type_v)) {
-            throw std::runtime_error("Token32 requires single-sequence Spark with Q8_0 or Q4_0 K/V, Vulkan KV offload and explicit Flash Attention");
-        }
-        if (params.kv_v_token32 && !token32_swa_supported) {
-            throw std::runtime_error("Token32 SWA K/V must match Full K/V or both use F16");
         }
         cparams.kv_v_token32 = params.kv_v_token32;
         memory.reset(model.create_memory(params_mem, cparams));
@@ -4460,8 +4466,8 @@ llama_context_params llama_context_default_params() {
         /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
-        /*.type_k_swa                  =*/ GGML_TYPE_COUNT,
-        /*.type_v_swa                  =*/ GGML_TYPE_COUNT,
+        /*.type_k_swa                  =*/ GGML_TYPE_F16,
+        /*.type_v_swa                  =*/ GGML_TYPE_F16,
         /*.moe_cache_size              =*/ 0,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
@@ -4475,7 +4481,7 @@ llama_context_params llama_context_default_params() {
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
-        /*.kv_v_token32                =*/ false,
+        /*.kv_v_token32                =*/ true,
         /*.kv_tail_tokens              =*/ 0,
     };
 
@@ -4519,6 +4525,10 @@ llama_context * llama_init_from_model(
         }
     }
 
+    if (model->arch != LLM_ARCH_SPARK2_5 && params.type_k_swa == GGML_TYPE_F16 && params.type_v_swa == GGML_TYPE_F16) {
+        params.type_k_swa = GGML_TYPE_COUNT;
+        params.type_v_swa = GGML_TYPE_COUNT;
+    }
     const bool override_swa = params.type_k_swa != GGML_TYPE_COUNT || params.type_v_swa != GGML_TYPE_COUNT;
     if (override_swa && model->arch != LLM_ARCH_SPARK2_5) {
         LLAMA_LOG_ERROR("%s: separate SWA cache types currently require Spark\n", __func__);

@@ -2478,11 +2478,18 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
         {"--kv-v-token32"},
-        "use token32 packed V for up to 8 queries (experimental, Arc 140T with q8_0 or q4_0 K/V and Flash Attention)",
+        "enable token32 packed V on compatible Arc 140T q8_0 or q4_0 K/V caches (default: enabled)",
         [](common_params & params) {
             params.kv_v_token32 = true;
         }
     ).set_env("LLAMA_ARG_KV_V_TOKEN32"));
+    add_opt(common_arg(
+        {"--no-kv-v-token32"},
+        "disable token32 packed V and use the ordinary KV cache layout",
+        [](common_params & params) {
+            params.kv_v_token32 = false;
+        }
+    ));
     add_opt(common_arg(
         {"--kv-tail-tokens"}, "N",
         "keep the newest N visible K/V rows in F16 (experimental, default: 0)",
@@ -2495,12 +2502,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_KV_TAIL_TOKENS"));
     add_opt(common_arg(
         {"--cache-type-k-swa"}, "TYPE",
-        "override the SWA K cache type (default: same as --cache-type-k)",
+        "override the SWA K cache type (default: f16)",
         [](common_params & params, const std::string & value) { params.cache_type_k_swa = kv_cache_type_from_str(value); }
     ));
     add_opt(common_arg(
         {"--cache-type-v-swa"}, "TYPE",
-        "override the SWA V cache type (default: same as --cache-type-v)",
+        "override the SWA V cache type (default: f16)",
         [](common_params & params, const std::string & value) { params.cache_type_v_swa = kv_cache_type_from_str(value); }
     ));
     add_opt(common_arg(

@@ -3,8 +3,7 @@
 The Vulkan backend includes the measured packed token32 V consumer for Intel Arc
 140T (device 0x7d51). It has an inline F16 decode path and an integer PV path.
 The private constructor and input checks are in
-`ggml/src/ggml-vulkan/ggml-vulkan-vplane.h`. The operator also reads the experimental token32 V8 and V4 model caches. Ordinary
-`-ctv q8_0` and `-ctv q4_0` select channel-block caches by default.
+`ggml/src/ggml-vulkan/ggml-vulkan-vplane.h`. The operator also reads the experimental token32 V8 and V4 model caches. Compatible single-sequence Spark Q8_0/Q8_0 and Q4_0/Q4_0 caches on Arc 140T use token32 by default. SWA K/V remain F16 by default. Other devices, model shapes and cache formats use the ordinary layout. Add `--no-kv-v-token32` to select the ordinary channel-block layout explicitly.
 
 Build with Vulkan integer-dot support. Run with `GGML_VK_DISABLE_COOPMAT=1`.
 Call `ggml_vk_flash_attn_vplane(ctx, q, k, packed_v, mask, bits, scale)`, then
@@ -30,7 +29,7 @@ packed input has no CPU or other-backend fallback.
 - Obtain `config` from `ggml_vk_vplane_tuning(kv, rows, bits)` before packing;
   changing groups requires repacking. Do not relabel existing channel32 data.
 - V8 and V4 accept M=1 through 8.
-  KV lengths are multiples of 32 through 131328. Q/K use the exact
+  KV lengths are multiples of 32 through 1048576. Q/K use the exact
   interleaved-head strides checked by the helper. Nonzero view offsets,
   sparse hints, sinks, ALiBi and softcaps are rejected. Optional masks are
   contiguous F16 `[kv, M]`. Accumulation precision is fixed to F32.
@@ -44,11 +43,10 @@ existing reduction path. Short caches retain WG128/row4 and split16/M.
 
 ## Incremental V8 and V4 cache
 
-Use `-ctk q8_0 -ctv q8_0 -fa on --kv-v-token32` for V8 or
-`-ctk q4_0 -ctv q4_0 -fa on --kv-v-token32` for V4. Set
+Use `-ctk q8_0 -ctv q8_0 -fa on` for V8 or
+`-ctk q4_0 -ctv q4_0 -fa on` for V4. `--kv-v-token32` remains accepted and `--no-kv-v-token32` disables the packed path. Set
 `GGML_VK_DISABLE_COOPMAT=1` for a single-sequence Spark D256/GQA4 context
-with KV layers on an Arc 140T. Add `--cache-type-k-swa f16 --cache-type-v-swa f16`
-to keep one F16 sliding-window cache and pack only the global layers.
+with KV layers on an Arc 140T. SWA K/V default to F16, so only global layers are packed. The explicit flags `--cache-type-k-swa f16 --cache-type-v-swa f16` preserve that selection. `llama-bench` uses the same defaults and accepts both token32 switches.
 Packed V supports 1 to 8 queries per microbatch, including target verification
 with 1 to 7 speculative draft tokens. The packed model cache keeps the same
 four-way layout across query widths, including at 64K and longer contexts.

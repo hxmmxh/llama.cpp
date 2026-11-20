@@ -18,6 +18,8 @@ constexpr int64_t GGML_VK_VPLANE_TILE_RECORD = 36;
 constexpr int64_t GGML_VK_VPLANE_TILE_BYTES = 8704;
 constexpr int64_t GGML_VK_VPLANE_V4_TILE_BYTES = 4608;
 constexpr int32_t GGML_VK_VPLANE_TILE_HAS_TAIL = 1;
+// Packed buffers and F16 gather offsets remain below the 32-bit shader address limit.
+constexpr int64_t GGML_VK_VPLANE_MAX_KV = 1024 * 1024;
 
 static inline constexpr int64_t ggml_vk_vplane_tile_bytes(int bits) {
     return bits == 4 ? GGML_VK_VPLANE_V4_TILE_BYTES : GGML_VK_VPLANE_TILE_BYTES;
@@ -72,7 +74,7 @@ static inline bool ggml_vk_vplane_inputs(const ggml_tensor * q, const ggml_tenso
         return false;
     }
     const int64_t kv = k->ne[1], rows = q->ne[1];
-    if (kv < 32 || kv > 131328 || kv % 32 != 0 || rows < 1 || rows > max_rows ||
+    if (kv < 32 || kv > GGML_VK_VPLANE_MAX_KV || kv % 32 != 0 || rows < 1 || rows > max_rows ||
         q->ne[0] != 256 || q->ne[2] != 8 || q->ne[3] != 1 ||
         k->ne[0] != 256 || k->ne[2] != 2 || k->ne[3] != 1 ||
         v->ne[0] != ggml_vk_vplane_tile_bytes(bits) || v->ne[1] != kv / 32 || v->ne[2] != 2 || v->ne[3] != 1) {
@@ -156,7 +158,7 @@ static inline bool ggml_vk_vplane_tail_inputs(
     }
     const auto valid = [](const ggml_tensor * t) {
         return t->type == GGML_TYPE_F16 && t->ne[0] == 256 && t->ne[2] == 2 && t->ne[3] == 1 &&
-            t->ne[1] > 0 && t->ne[1] <= 131328 && t->nb[0] == 2 && t->nb[1] == 1024 && t->nb[2] == 512;
+            t->ne[1] > 0 && t->ne[1] <= GGML_VK_VPLANE_MAX_KV && t->nb[0] == 2 && t->nb[1] == 1024 && t->nb[2] == 512;
     };
     return valid(kt) && valid(vt) && kt->ne[1] == vt->ne[1];
 }

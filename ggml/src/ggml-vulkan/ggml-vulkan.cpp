@@ -17148,7 +17148,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             const auto * values = pack ? op->src[0] : op;
             if (!packed || packed->type != GGML_TYPE_I8 ||
                 (packed->ne[0] != GGML_VK_VPLANE_TILE_BYTES && packed->ne[0] != GGML_VK_VPLANE_V4_TILE_BYTES) ||
-                packed->ne[2] != 2 || packed->ne[3] != 1 || packed->ne[1] > 131328 / 32 ||
+                packed->ne[2] != 2 || packed->ne[3] != 1 || packed->ne[1] > GGML_VK_VPLANE_MAX_KV / 32 ||
                 packed->nb[0] != 1 || packed->nb[1] != size_t(packed->ne[0]) || packed->nb[2] < packed->nb[1] * size_t(packed->ne[1]) ||
                 packed->nb[2] % packed->nb[1] != 0 || packed->nb[3] != 2 * packed->nb[2] ||
                 !meta || meta->type != GGML_TYPE_I32 || meta->ne[2] != 1 || meta->ne[3] != 1 || !ggml_is_contiguous(meta) ||

@@ -346,8 +346,9 @@ struct cmd_params {
     std::vector<int>                 n_ubatch;
     std::vector<ggml_type>           type_k;
     std::vector<ggml_type>           type_v;
-    ggml_type type_k_swa = GGML_TYPE_COUNT;
-    ggml_type type_v_swa = GGML_TYPE_COUNT;
+    ggml_type type_k_swa = GGML_TYPE_F16;
+    ggml_type type_v_swa = GGML_TYPE_F16;
+    bool kv_v_token32 = true;
     std::vector<int>                 n_threads;
     std::vector<std::string>         cpu_mask;
     std::vector<bool>                cpu_strict;
@@ -394,8 +395,9 @@ static const cmd_params cmd_params_defaults = {
     /* n_ubatch             */ { 512 },
     /* type_k               */ { GGML_TYPE_F16 },
     /* type_v               */ { GGML_TYPE_F16 },
-    /* type_k_swa           */ GGML_TYPE_COUNT,
-    /* type_v_swa           */ GGML_TYPE_COUNT,
+    /* type_k_swa           */ GGML_TYPE_F16,
+    /* type_v_swa           */ GGML_TYPE_F16,
+    /* kv_v_token32         */ true,
     /* n_threads            */ { common_cpu_get_num_math() },
     /* cpu_mask             */ { "0x0" },
     /* cpu_strict           */ { false },
@@ -468,8 +470,9 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -d, --n-depth <n>                                 (default: %s)\n", join(cmd_params_defaults.n_depth, ",").c_str());
     printf("  -b, --batch-size <n>                              (default: %s)\n", join(cmd_params_defaults.n_batch, ",").c_str());
     printf("  -ub, --ubatch-size <n>                            (default: %s)\n", join(cmd_params_defaults.n_ubatch, ",").c_str());
-    printf("  --cache-type-k-swa <t>                          (default: same as K)\n");
-    printf("  --cache-type-v-swa <t>                          (default: same as V)\n");
+    printf("  --kv-v-token32, --no-kv-v-token32                 (default: enabled on compatible caches)\n");
+    printf("  --cache-type-k-swa <t>                          (default: f16)\n");
+    printf("  --cache-type-v-swa <t>                          (default: f16)\n");
     printf("  -ctk, --cache-type-k <t>                          (default: %s)\n", join(transform_to_str(cmd_params_defaults.type_k, ggml_type_name), ",").c_str());
     printf("  -ctv, --cache-type-v <t>                          (default: %s)\n", join(transform_to_str(cmd_params_defaults.type_v, ggml_type_name), ",").c_str());
     printf("  -t, --threads <n>                                 (default: %s)\n", join(cmd_params_defaults.n_threads, ",").c_str());
@@ -638,6 +641,8 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = parse_int_range(argv[i]);
                 params.n_ubatch.insert(params.n_ubatch.end(), p.begin(), p.end());
+            } else if (arg == "--kv-v-token32" || arg == "--no-kv-v-token32") {
+                params.kv_v_token32 = arg == "--kv-v-token32";
             } else if (arg == "--cache-type-k-swa" || arg == "--cache-type-v-swa") {
                 if (++i >= argc) { invalid_param = true; break; }
                 const auto type = ggml_type_from_name(argv[i]);
@@ -1231,6 +1236,7 @@ struct cmd_params_instance {
     ggml_type          type_v;
     ggml_type          type_k_swa;
     ggml_type          type_v_swa;
+    bool               kv_v_token32;
     int                n_threads;
     std::string        cpu_mask;
     bool               cpu_strict;
@@ -1326,6 +1332,7 @@ struct cmd_params_instance {
         cparams.type_v          = type_v;
         cparams.type_k_swa      = type_k_swa;
         cparams.type_v_swa      = type_v_swa;
+        cparams.kv_v_token32    = kv_v_token32;
         cparams.offload_kqv     = !no_kv_offload;
         cparams.flash_attn_type = flash_attn;
         cparams.embeddings      = embeddings;
@@ -1383,6 +1390,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .type_v                = */ tv,
                 /* .type_k_swa            = */ params.type_k_swa,
                 /* .type_v_swa            = */ params.type_v_swa,
+                /* .kv_v_token32          = */ params.kv_v_token32,
                 /* .n_threads             = */ nt,
                 /* .cpu_mask              = */ cm,
                 /* .cpu_strict            = */ cs,
@@ -1423,6 +1431,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .type_v                = */ tv,
                 /* .type_k_swa            = */ params.type_k_swa,
                 /* .type_v_swa            = */ params.type_v_swa,
+                /* .kv_v_token32          = */ params.kv_v_token32,
                 /* .n_threads             = */ nt,
                 /* .cpu_mask              = */ cm,
                 /* .cpu_strict            = */ cs,
@@ -1463,6 +1472,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .type_v                = */ tv,
                 /* .type_k_swa            = */ params.type_k_swa,
                 /* .type_v_swa            = */ params.type_v_swa,
+                /* .kv_v_token32          = */ params.kv_v_token32,
                 /* .n_threads             = */ nt,
                 /* .cpu_mask              = */ cm,
                 /* .cpu_strict            = */ cs,

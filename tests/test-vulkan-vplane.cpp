@@ -196,11 +196,10 @@ static std::unique_ptr<variant> make_time_fa(ggml_backend_t gpu,int kv,int m,con
     std::cerr<<"VPLANE_LAYOUT bits="<<bits<<" groups="<<groups<<" kv="<<kv<<" rows="<<m<<" bytes="<<a->bytes<<std::endl;return a;
 }
 
-static void check_vplane_writer(ggml_backend_t gpu, int bits) {
+static void check_vplane_writer(ggml_backend_t gpu, int bits, int rows = 96) {
     constexpr int width = 512;
-    constexpr int rows = 96;
     const int tile_bytes = ggml_vk_vplane_tile_bytes(bits);
-    context_owner ctx(ggml_init({256 * 1024, nullptr, true}), ggml_free);
+    context_owner ctx(ggml_init({1024 * 1024, nullptr, true}), ggml_free);
     require(bool(ctx), "Writer context allocation failed");
     auto * raw = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F16, width, rows);
     auto * tiles = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 2, 3);
@@ -208,8 +207,13 @@ static void check_vplane_writer(ggml_backend_t gpu, int bits) {
     auto * update = ggml_vk_vplane_pack_v8(ctx.get(), raw, tiles, packed);
     auto * graph = ggml_new_graph(ctx.get());
     ggml_build_forward_expand(graph, update);
+    auto * map = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, rows / 32);
+    auto * gathered = ggml_vk_vplane_gather_v8(ctx.get(), packed, map, raw);
+    auto * gather_graph = ggml_new_graph(ctx.get());
+    ggml_build_forward_expand(gather_graph, gathered);
     buffer_owner buffer(ggml_backend_alloc_ctx_tensors(ctx.get(), gpu), ggml_backend_buffer_free);
-    require(bool(buffer) && ggml_backend_supports_op(gpu, update), "Writer backend not supported");
+    require(bool(buffer) && ggml_backend_supports_op(gpu, update) && ggml_backend_supports_op(gpu, gathered),
+            "Writer or gather backend not supported");
 
     const auto source = input(width * rows, 0xfe2251u);
     std::vector<ggml_fp16_t> half(source.size());
@@ -219,7 +223,7 @@ static void check_vplane_writer(ggml_backend_t gpu, int bits) {
     std::vector<uint8_t> actual(expected.size());
     std::vector<float> rounding_distance(bits == 4 ? 2 * expected.size() : 0, INFINITY);
     ggml_backend_tensor_set(packed, expected.data(), 0, expected.size());
-    const uint32_t indices[] = {2, UINT32_MAX, 0, 0x80020001u, UINT32_MAX, 0};
+    const uint32_t indices[] = {uint32_t(rows / 32 - 1), UINT32_MAX, 0, 0x80020001u, UINT32_MAX, 0};
     ggml_backend_tensor_set(tiles, indices, 0, sizeof(indices));
     const auto * traits = ggml_get_type_traits(bits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0);
     for (int item = 0; item < 2; ++item) {
@@ -288,7 +292,40 @@ static void check_vplane_writer(ggml_backend_t gpu, int bits) {
             require(false, "V8 writer differs from canonical token32 packing");
         }
     }
-    std::cout << "VPLANE_WRITER_OK bits=" << bits << " full=1 partial=1 untouched=1 rounding_ties=" << rounding_ties << '\n';
+    std::vector<int32_t> slots(rows / 32, -1);
+    ggml_backend_tensor_set(map, slots.data(), 0, ggml_nbytes(map));
+    compute(gpu, gather_graph);
+    for (int tile : {0, 1, rows / 64, rows / 32 - 1}) {
+        std::vector<ggml_fp16_t> values(width * 32);
+        ggml_backend_tensor_get(gathered, values.data(), size_t(tile) * values.size() * sizeof(ggml_fp16_t),
+                                values.size() * sizeof(ggml_fp16_t));
+        for (int head = 0; head < 2; ++head) {
+            const auto * bytes = actual.data() + (head * (rows / 32) + tile) * tile_bytes;
+            for (int d = 0; d < 256; ++d) {
+                ggml_fp16_t scale;
+                std::memcpy(&scale, bytes + 2 * d, sizeof(scale));
+                for (int lane = 0; lane < 32; ++lane) {
+                    const int group = lane % 4, c = lane / 4;
+                    int code;
+                    if (bits == 4) {
+                        const int offset = 512 + (group * 64 + d / 4) * 16 + (d % 4) * 4 + c / 2;
+                        code = int((bytes[offset] >> (4 * (c % 2))) & 15) - 8;
+                    } else {
+                        const int offset = 512 + (group * 64 + d / 4) * 32 + (c / 4) * 16 + (d % 4) * 4 + c % 4;
+                        int8_t value;
+                        std::memcpy(&value, bytes + offset, sizeof(value));
+                        code = value;
+                    }
+                    const auto expected_value = ggml_fp32_to_fp16(ggml_fp16_to_fp32(scale) * code);
+                    require(ggml_fp16_to_fp32(values[lane * width + head * 256 + d]) ==
+                            ggml_fp16_to_fp32(expected_value), "Gather differs from packed cache bytes");
+                }
+            }
+        }
+    }
+    std::cout << "VPLANE_WRITER_OK bits=" << bits << " rows=" << rows
+              << " full=1 partial=1 untouched=1 rounding_ties=" << rounding_ties << '\n';
+    std::cout << "VPLANE_GATHER_OK bits=" << bits << " rows=" << rows << '\n';
 }
 
 static void contract_tests() {
@@ -317,6 +354,13 @@ static void contract_tests() {
         *q = saved_q;
         mask->ne[0] -= 1;
         require(!ggml_vk_vplane_inputs(q, k, v, mask, bits), "Short mask accepted");
+        for (int64_t kv : {int64_t(131584), int64_t(262656), GGML_VK_VPLANE_MAX_KV, GGML_VK_VPLANE_MAX_KV + 32}) {
+            auto * long_k = ggml_permute(ctx.get(), ggml_new_tensor_3d(ctx.get(), type, 256, 2, kv), 0, 2, 1, 3);
+            auto * long_v = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_I8, ggml_vk_vplane_tile_bytes(bits), kv / 32, 2);
+            auto * long_mask = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F16, kv, 1);
+            require(ggml_vk_vplane_inputs(q, long_k, long_v, long_mask, bits) == (kv <= GGML_VK_VPLANE_MAX_KV),
+                    "Long KV contract boundary failed");
+        }
     }
     for (uint32_t word = 0; word < 65536; ++word) {
         uint32_t spread = (word & 15) | ((word & 240) << 4) | ((word & 3840) << 8) | ((word & 61440) << 12);
@@ -366,8 +410,9 @@ int main(int argc, char ** argv) {
         contract_tests();
         if (argc == 1 || (argc == 2 && std::string(argv[1]) == "--contract")) { return 0; }
         const bool measure_tail = argc == 2 && std::string(argv[1]) == "--tail-perf";
-        require(argc >= 2 && (std::string(argv[1]) == "--gpu" || measure_tail),
-                "Usage: test-vulkan-vplane [--contract | --gpu [reference.bin] | --tail-perf]");
+        const bool long_kv = argc == 2 && std::string(argv[1]) == "--gpu-long";
+        require(argc >= 2 && (std::string(argv[1]) == "--gpu" || long_kv || measure_tail),
+                "Usage: test-vulkan-vplane [--contract | --gpu [reference.bin] | --gpu-long | --tail-perf]");
         ggml_backend_load_all();
         auto device = ggml_backend_dev_by_name("Vulkan0");
         require(device != nullptr, "Vulkan0 missing");
@@ -377,11 +422,13 @@ int main(int argc, char ** argv) {
             measure_vplane_tail(gpu.get());
             return 0;
         }
-        check_vplane_writer(gpu.get(), 8);
-        check_vplane_writer(gpu.get(), 4);
+        check_vplane_writer(gpu.get(), 8, long_kv ? 262656 : 96);
+        check_vplane_writer(gpu.get(), 4, long_kv ? 262656 : 96);
         std::ifstream prior;
         if (argc == 3) { prior.open(argv[2], std::ios::binary); require(prior.good(), "Cannot open historical reference"); }
-        const std::vector<std::array<int,3>> shapes = {{{768,1,102}},{{768,3,13}},{{33024,1,103}},{{33024,2,7}},{{33024,4,6}},{{33024,8,100}},{{131328,1,104}},{{131328,2,11}},{{131328,4,10}},{{131328,8,101}}};
+        const std::vector<std::array<int,3>> shapes = long_kv ?
+            std::vector<std::array<int,3>>{{{262656,1,104}},{{262656,4,10}},{{262656,8,101}}} :
+            std::vector<std::array<int,3>>{{{768,1,102}},{{768,3,13}},{{33024,1,103}},{{33024,2,7}},{{33024,4,6}},{{33024,8,100}},{{131328,1,104}},{{131328,2,11}},{{131328,4,10}},{{131328,8,101}}};
         int count = 0;
         for (auto shape : shapes) {
             int kv = shape[0], m = shape[1];
@@ -421,6 +468,7 @@ int main(int argc, char ** argv) {
         }
         if (prior.is_open()) { require(prior.peek() == std::char_traits<char>::eof(), "Trailing historical reference data"); }
         std::cout << "VPLANE_COMPLETE cases=" << count << std::endl;
+        if (long_kv) { return 0; }
 
         const std::array<std::array<int, 2>, 6> cache_shapes = {{
             {768, 5}, {2304, 6}, {8448, 3}, {8448, 7}, {65792, 2}, {65792, 8},

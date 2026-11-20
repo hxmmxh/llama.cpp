@@ -106,7 +106,7 @@ llama_kv_cache::llama_kv_cache(
 
     if (vplane_enabled) {
         if (n_stream != 1 || other || v_trans || !offload || hparams.is_mla() ||
-            kv_size % 32 != 0 || kv_size > 131328 || type_k != type_v ||
+            kv_size % 32 != 0 || kv_size > GGML_VK_VPLANE_MAX_KV || type_k != type_v ||
             (type_v != GGML_TYPE_Q4_0 && type_v != GGML_TYPE_Q8_0)) {
             throw std::runtime_error("Unsupported token32 cache configuration");
         }
@@ -2683,7 +2683,7 @@ void llama_kv_cache::state_set_vplane_rows(
 }
 
 bool llama_kv_cache::state_read_vplane(llama_io_read_i & io, const slot_info & sinfo) {
-    constexpr uint32_t max_rows = 131328;
+    constexpr uint32_t max_rows = GGML_VK_VPLANE_MAX_KV;
     const size_t tile_bytes = ggml_vk_vplane_tile_bytes(vplane_bits);
     const size_t capacity = v_cells[0].size();
     const auto & dst_rows = sinfo.idxs[0];
