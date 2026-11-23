@@ -153,7 +153,7 @@ try {
     }
     $nativeArgs = @('-m', $modelPath, '--device', $Device, '-ngl', '99',
         '-fa', 'on', '-c', "$ContextSize", '-t', "$Threads", '-tb', "$Threads",
-        '-b', '512', '-ub', '128', '-ctk', $KVCache, '-ctv', $KVCache,
+        '-b', '512', '-ub', '512', '-ctk', $KVCache, '-ctv', $KVCache,
         '--cache-type-k-swa', 'f16', '--cache-type-v-swa', 'f16',
         '--fit', 'off', '--jinja', '--reasoning', 'on', '--reasoning-effort', 'low',
         '--temp', '1', '--top-p', '0.95', '--top-k', '0', '--min-p', '0',

@@ -100,7 +100,7 @@ struct variant {
     std::vector<float> k,v,masked_v,exact_k,exact_v;
     ggml_type kt,vt;size_t bytes=0;
 };
-static std::unique_ptr<variant> make_time_fa(ggml_backend_t gpu,int kv,int m,const std::vector<float>&q,const std::vector<float>&k,const std::vector<float>&v,int groups,ggml_type kt,int bits, bool causal = false, int tail = 0, bool tiled = false) {
+static std::unique_ptr<variant> make_time_fa(ggml_backend_t gpu,int kv,int m,const std::vector<float>&q,const std::vector<float>&k,const std::vector<float>&v,int groups,ggml_type kt,int bits, bool causal = false, int tail = 0, bool tiled = false, bool prefill = false, bool mask_tiles = false) {
     require((groups==4||groups==8)&&(bits==4||bits==8),"Invalid plane format");
     const ggml_type vt=bits==4?GGML_TYPE_Q4_0:GGML_TYPE_Q8_0;
     const int block_bytes=bits==4?18:34,chunk_bytes=256*block_bytes;
@@ -112,6 +112,10 @@ static std::unique_ptr<variant> make_time_fa(ggml_backend_t gpu,int kv,int m,con
     auto * f16 = causal ? ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 256, 2, kv) : nullptr;
     auto * masked_v = f16 ? ggml_permute(ctx, f16, 0, 2, 1, 3) : nullptr;
     ggml_tensor * exact_k = nullptr, * exact_v = nullptr, * slots = nullptr, * scratch = nullptr, * map = nullptr;
+    if (prefill && causal) {
+        masked_v = ggml_reshape_2d(ctx, f16, 512, kv);
+        map = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (kv / 32) * (mask_tiles ? 1 + m : 1));
+    }
     if (tail > 0) {
         exact_k = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 256, 2, kv);
         exact_v = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 256, 2, kv);
@@ -122,7 +126,7 @@ static std::unique_ptr<variant> make_time_fa(ggml_backend_t gpu,int kv,int m,con
             ggml_permute(ctx, exact_k, 0, 2, 1, 3), ggml_permute(ctx, exact_v, 0, 2, 1, 3),
             slots, scratch, map, bits, 1.f / 16.f, tiled);
     } else {
-        a->out = ggml_vk_flash_attn_vplane(ctx, qp, kp, vr, mask, bits, 1.f / 16.f, groups, masked_v);
+        a->out = ggml_vk_flash_attn_vplane(ctx, qp, kp, vr, mask, bits, 1.f / 16.f, groups, masked_v, map, false, prefill);
     }
     require(a->out != nullptr, "Plane constructor rejected valid inputs");
     ggml_set_name(a->out, "vplane_attention");
@@ -162,6 +166,22 @@ static std::unique_ptr<variant> make_time_fa(ggml_backend_t gpu,int kv,int m,con
     }
     const int history=kv>1024?kv-256:kv-m,window=kv==768?(m==3?513:512):0;std::vector<ggml_fp16_t> masks(size_t(kv)*m);
     for(int row=0;row<m;++row)for(int col=0;col<kv;++col){int end=std::min(kv,history+row+1),first=window?std::max(0,end-window):0;masks[size_t(row)*kv+col]=ggml_fp32_to_fp16(col>=first&&col<end?0.f:-INFINITY);}
+    if (prefill && causal) {
+        const int tiles = kv / 32;
+        std::vector<int32_t> values(size_t(tiles) * (mask_tiles ? 1 + m : 1));
+        for (int tile = 0; tile < tiles; ++tile) {
+            values[tile] = tile % 3 == 0 ? tile : -1;
+            if (values[tile] >= 0) {
+                const size_t begin = size_t(tile) * 32 * 512;
+                std::copy_n(a->masked_v.begin() + begin, 32 * 512, a->v.begin() + begin);
+            }
+            for (int row = 0; mask_tiles && row < m; ++row) {
+                values[size_t(1 + row) * tiles + tile] =
+                    ggml_vk_vplane_tile_mask(masks.data() + size_t(row) * kv + 32 * tile);
+            }
+        }
+        ggml_backend_tensor_set(map, values.data(), 0, ggml_nbytes(map));
+    }
     if (tail > 0) {
         a->exact_k = upload(exact_k, k);
         a->exact_v = upload(exact_v, v);
@@ -361,6 +381,16 @@ static void contract_tests() {
             require(ggml_vk_vplane_inputs(q, long_k, long_v, long_mask, bits) == (kv <= GGML_VK_VPLANE_MAX_KV),
                     "Long KV contract boundary failed");
         }
+        for (int64_t rows : {9, 64, 128, 512, 1024, 1025}) {
+            auto * wide_q = ggml_permute(ctx.get(), ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, 256, 8, rows), 0, 2, 1, 3);
+            auto * wide_mask = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F16, 33024, rows);
+            require(!ggml_vk_flash_attn_vplane(ctx.get(), wide_q, k, v, wide_mask, bits, 1.f / 16.f),
+                    "Wide query accepted without prefill opt-in");
+            const auto * out = ggml_vk_flash_attn_vplane(ctx.get(), wide_q, k, v, wide_mask, bits,
+                1.f / 16.f, 4, nullptr, nullptr, false, true);
+            require(bool(out) == (rows <= GGML_VK_VPLANE_MAX_PREFILL_ROWS), "Prefill query boundary failed");
+            require(!out || out->op_params[9] == 1, "Prefill dispatch marker missing");
+        }
     }
     for (uint32_t word = 0; word < 65536; ++word) {
         uint32_t spread = (word & 15) | ((word & 240) << 4) | ((word & 3840) << 8) | ((word & 61440) << 12);
@@ -405,19 +435,52 @@ static void measure_vplane_tail(ggml_backend_t gpu) {
     }
 }
 
+static void check_vplane_prefill(ggml_backend_t gpu) {
+    for (const auto & shape : std::array<std::array<int, 2>, 6>{{{512, 64}, {4352, 9}, {4352, 128}, {4352, 257}, {4352, 512}, {4352, 1024}}}) {
+        const int kv = shape[0], rows = shape[1];
+        const auto q = input(size_t(256) * 8 * rows, 0x7341u + rows);
+        const auto k = input(size_t(256) * 2 * kv, 0x7342u + rows);
+        const auto v = input(size_t(256) * 2 * kv, 0x7343u + rows);
+        for (int bits : {4, 8}) {
+            for (bool mask_tiles : {false, true}) {
+                auto a = make_time_fa(gpu, kv, rows, q, k, v, 4,
+                    bits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0, bits, true, 0, false, true, mask_tiles);
+                const auto ref = reference(q, a->k, a->v, kv, rows);
+                compute(gpu, a->graph);
+                const auto values = read(a->out);
+                compute(gpu, a->graph);
+                require(values == read(a->out), "Prefill output changed on repeat");
+                const auto error = compare(values, ref);
+                require(error.nrmse <= .03 && error.max_abs <= .02, "Prefill FP64 numerical contract failed");
+                a->out->op_params[9] = 2;
+                require(!ggml_backend_supports_op(gpu, a->out), "Invalid prefill marker accepted");
+                a->out->op_params[9] = 0;
+                require(!ggml_backend_supports_op(gpu, a->out), "Wide query accepted as decode");
+                std::cout << "VPLANE_PREFILL_OK kv=" << kv << " rows=" << rows << " bits=" << bits
+                          << " mask_tiles=" << mask_tiles << " nrmse=" << error.nrmse << " max_abs=" << error.max_abs << '\n';
+            }
+        }
+    }
+}
+
 int main(int argc, char ** argv) {
     try {
         contract_tests();
         if (argc == 1 || (argc == 2 && std::string(argv[1]) == "--contract")) { return 0; }
         const bool measure_tail = argc == 2 && std::string(argv[1]) == "--tail-perf";
         const bool long_kv = argc == 2 && std::string(argv[1]) == "--gpu-long";
-        require(argc >= 2 && (std::string(argv[1]) == "--gpu" || long_kv || measure_tail),
-                "Usage: test-vulkan-vplane [--contract | --gpu [reference.bin] | --gpu-long | --tail-perf]");
+        const bool prefill = argc == 2 && std::string(argv[1]) == "--gpu-prefill";
+        require(argc >= 2 && (std::string(argv[1]) == "--gpu" || long_kv || measure_tail || prefill),
+                "Usage: test-vulkan-vplane [--contract | --gpu [reference.bin] | --gpu-long | --tail-perf | --gpu-prefill]");
         ggml_backend_load_all();
         auto device = ggml_backend_dev_by_name("Vulkan0");
         require(device != nullptr, "Vulkan0 missing");
         backend_owner gpu(ggml_backend_dev_init(device, nullptr), ggml_backend_free);
         require(bool(gpu), "Vulkan initialization failed");
+        if (prefill) {
+            check_vplane_prefill(gpu.get());
+            return 0;
+        }
         if (measure_tail) {
             measure_vplane_tail(gpu.get());
             return 0;

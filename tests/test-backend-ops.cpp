@@ -2933,6 +2933,16 @@ struct test_spark_q8_producer : public test_case {
 };
 
 
+struct test_spark_prefill_ffn : public test_spark_ffn_mmvq {
+    using test_spark_ffn_mmvq::test_spark_ffn_mmvq;
+    std::string op_desc(ggml_tensor *) override { return "SPARK_PREFILL_FFN"; }
+};
+
+struct test_spark_prefill_producer : public test_spark_q8_producer {
+    using test_spark_q8_producer::test_spark_q8_producer;
+    std::string op_desc(ggml_tensor *) override { return "SPARK_PREFILL_PRODUCER"; }
+};
+
 struct test_spark_qkv_gate : public test_case {
     const ggml_type type;
     const int64_t n_tokens;
@@ -9342,6 +9352,14 @@ struct test_small_m_attention : public test_flash_attn_ext {
     std::string op_desc(ggml_tensor *) override { return "SMALL_M_ATTENTION"; }
 };
 
+struct test_spark_prefill_attention : public test_flash_attn_ext {
+    test_spark_prefill_attention(int64_t tokens, ggml_type k_type, ggml_type v_type, int64_t length = 4096)
+        : test_flash_attn_ext(256, 256, 2, {4, 1}, length, tokens, true, false, 0, 0,
+                              GGML_PREC_F32, k_type, v_type, {0, 2, 1, 3}, false) {}
+
+    std::string op_desc(ggml_tensor *) override { return "SPARK_PREFILL_ATTENTION"; }
+};
+
 // GGML_OP_CROSS_ENTROPY_LOSS
 struct test_spark_attention : public test_flash_attn_ext {
     const int scenario;
@@ -13320,6 +13338,27 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_spark_q8_producer("glu", 4, false, GGML_TYPE_Q4_K));
     test_cases.emplace_back(new test_spark_q8_producer("attn_rms", 4, false, GGML_TYPE_Q4_K));
     test_cases.emplace_back(new test_spark_q8_producer("head", 9));
+    for (int64_t tokens : {63, 64, 128, 257, 1024, 1025}) {
+        test_cases.emplace_back(new test_spark_prefill_attention(tokens, GGML_TYPE_F16, GGML_TYPE_F16));
+        test_cases.emplace_back(new test_spark_prefill_attention(tokens, GGML_TYPE_Q8_0, GGML_TYPE_F16));
+        test_cases.emplace_back(new test_spark_prefill_attention(tokens, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+        for (auto down : {GGML_TYPE_Q4_K, GGML_TYPE_Q4_1}) {
+            test_cases.emplace_back(new test_spark_prefill_ffn(down, tokens, false, false, 2048, 6656));
+        }
+    }
+    test_cases.emplace_back(new test_spark_prefill_attention(64, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 32768));
+    test_cases.emplace_back(new test_spark_prefill_attention(64, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 65536));
+    test_cases.emplace_back(new test_spark_prefill_ffn(GGML_TYPE_Q4_K, 128, true, false, 2048, 6656));
+    test_cases.emplace_back(new test_spark_prefill_ffn(GGML_TYPE_Q4_K, 128, false, true, 2048, 6656));
+    test_cases.emplace_back(new test_spark_prefill_ffn(GGML_TYPE_Q4_K, 128, false, false, 2048, 6656, GGML_TYPE_BF16));
+    test_cases.emplace_back(new test_spark_prefill_ffn(GGML_TYPE_Q4_K, 128, false, false, 2048, 6656, GGML_TYPE_Q4_K, GGML_PREC_F32));
+    for (const std::string position : {"glu", "attn_mul", "attn_rms"}) {
+        for (int64_t tokens : {64, 129, 1024}) {
+            test_cases.emplace_back(new test_spark_prefill_producer(position, tokens));
+        }
+        test_cases.emplace_back(new test_spark_prefill_producer(position, 128, true));
+    }
+    test_cases.emplace_back(new test_spark_prefill_producer("glu", 128, false, GGML_TYPE_Q4_1));
     for (ggml_type type : {GGML_TYPE_Q4_K, GGML_TYPE_Q6_K}) {
         test_cases.emplace_back(new test_spark_qkv_gate(type, 1, false, false, 2048));
         test_cases.emplace_back(new test_spark_qkv_gate(type, 1, false, true, 2048));

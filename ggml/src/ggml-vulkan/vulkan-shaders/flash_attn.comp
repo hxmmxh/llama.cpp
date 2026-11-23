@@ -87,6 +87,7 @@ const bool PV_PLANE_Q4 = (Flags & 512u) != 0;
 const bool PV_PLANE_MASKED_F16 = (Flags & 1024u) != 0;
 const bool PV_PLANE_F16_TILE_MAP = (Flags & 2048u) != 0;
 const bool PV_PLANE_MASK_TILES = (Flags & 32768u) != 0;
+const bool PV_PLANE_PREFILL = (Flags & 65536u) != 0;
 layout (binding = 8) readonly buffer VPLANE_MAP {int vplane_map[];};
 layout (binding = 7) readonly buffer VPLANE_F16 {f16vec4 data_vplane_f16[];};
 layout (binding = 9) readonly buffer VPLANE_K_TAIL {f16vec4 data_k_tail[];};
@@ -318,7 +319,8 @@ void main() {
         }
 
 #ifdef MMQ
-        if (PV_PLANE_F16_TILE_MAP && (use_f16_v || PV_PLANE_TAIL)) {
+        // Prefill matches the gather path's exact values for every dirty tile.
+        if (PV_PLANE_F16_TILE_MAP && (use_f16_v || PV_PLANE_TAIL || PV_PLANE_PREFILL)) {
             f16_slot = vplane_map[j];
             use_f16_v = f16_slot >= 0;
         }

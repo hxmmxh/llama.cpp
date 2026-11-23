@@ -14,6 +14,7 @@ constexpr uint32_t GGML_VK_FA_VPLANE_MASKED_F16 = 1024u;
 constexpr uint32_t GGML_VK_FA_VPLANE_F16_TILE_MAP = 2048u;
 constexpr uint32_t GGML_VK_FA_VPLANE_TAIL = 4096u;
 constexpr uint32_t GGML_VK_FA_VPLANE_MASK_TILES = 32768u;
+constexpr uint32_t GGML_VK_FA_VPLANE_PREFILL = 65536u;
 constexpr int64_t GGML_VK_VPLANE_TILE_RECORD = 36;
 constexpr int64_t GGML_VK_VPLANE_TILE_BYTES = 8704;
 constexpr int64_t GGML_VK_VPLANE_V4_TILE_BYTES = 4608;
@@ -41,6 +42,7 @@ static inline int32_t ggml_vk_vplane_tile_mask(const ggml_fp16_t * mask) {
 
 static constexpr int64_t GGML_VK_VPLANE_MAX_QUERY_ROWS = 8;
 static constexpr int64_t GGML_VK_VPLANE_MAX_TAIL_ROWS = 128;
+static constexpr int64_t GGML_VK_VPLANE_MAX_PREFILL_ROWS = 1024;
 static constexpr uint32_t GGML_VK_VPLANE_CACHE_GROUPS = 4;
 
 struct ggml_vk_vplane_config {
@@ -53,7 +55,7 @@ struct ggml_vk_vplane_config {
 
 static inline ggml_vk_vplane_config ggml_vk_vplane_tuning(
         int64_t kv, int64_t rows, int bits, uint32_t groups = 0) {
-    if (rows <= 0 || rows > GGML_VK_VPLANE_MAX_TAIL_ROWS) {
+    if (rows <= 0 || rows > GGML_VK_VPLANE_MAX_PREFILL_ROWS) {
         return {};
     }
     const bool long_kv = kv >= 4096;
@@ -122,8 +124,10 @@ static inline bool ggml_vk_vplane_integer_pv(
 static inline ggml_tensor * ggml_vk_flash_attn_vplane(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k,
                                                      ggml_tensor * v, ggml_tensor * mask, int bits, float scale,
                                                      uint32_t groups = 0, ggml_tensor * masked_v = nullptr,
-                                                     ggml_tensor * tile_map = nullptr, bool with_tail = false) {
-    const int64_t max_rows = with_tail ? GGML_VK_VPLANE_MAX_TAIL_ROWS : GGML_VK_VPLANE_MAX_QUERY_ROWS;
+                                                     ggml_tensor * tile_map = nullptr, bool with_tail = false,
+                                                     bool prefill = false) {
+    const int64_t max_rows = prefill ? GGML_VK_VPLANE_MAX_PREFILL_ROWS :
+        (with_tail ? GGML_VK_VPLANE_MAX_TAIL_ROWS : GGML_VK_VPLANE_MAX_QUERY_ROWS);
     if (!ctx || !std::isfinite(scale) || !ggml_vk_vplane_inputs(q, k, v, mask, bits, max_rows) ||
         !ggml_vk_vplane_masked_v_inputs(masked_v, tile_map, k, mask)) {
         return nullptr;
@@ -141,6 +145,7 @@ static inline ggml_tensor * ggml_vk_flash_attn_vplane(ggml_context * ctx, ggml_t
     out->op_params[6] = bits;
     out->op_params[7] = config.groups;
     out->op_params[8] = ggml_vk_vplane_integer_pv(config, bits, masked_v, tile_map);
+    out->op_params[9] = prefill ? 1 : 0;
     return out;
 }
 

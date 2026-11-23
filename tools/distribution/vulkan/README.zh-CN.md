@@ -33,6 +33,8 @@ UTF-8 文本文件输入，或调整上下文、生成上限：
 
 CLI 默认上下文 8192、12 个 CPU 线程、最大生成 512 token（含思考）、Vulkan0、最多卸载 99 层、Flash Attention 开启、F16 KV。`-MaxTokens -1` 允许生成到模型自然结束或上下文耗尽。默认使用 thinking low、target T=1 / top_p=0.95。脚本为 Arc 140T 设置 `GGML_VK_DISABLE_COOPMAT=1`。
 
+CLI 和 server 默认 `-b 512 -ub 512`。较大的 ubatch 可减少长提示的分批开销，也会增加计算缓冲和 SWA KV 缓存的预留内存；DSpark 的 draft 默认继承此上限。内存紧张时，可在 PowerShell 调用 `run.ps1` 时用 `-ExtraArgs @('-ub', '128')` 覆盖。更新启动脚本后，下次启动生效。 兼容 Arc 140T 的 token32 V4/V8 缓存默认启用 packed V prefill 和 mask tile 分类（9..1024 个 query，无 precision tail）；可设置 `LLAMA_VPLANE_PREFILL=0` 回退，或 `LLAMA_VPLANE_PREFILL_MASK_TILES=0` 仅关闭 prefill mask 分类。
+
 ## HTTP API
 
 ```bat

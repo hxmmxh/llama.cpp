@@ -786,6 +786,15 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
     }
 }
 
+static bool kv_vplane_prefill(uint32_t n_queries) {
+    static const bool enabled = [] {
+        const char * value = std::getenv("LLAMA_VPLANE_PREFILL");
+        return !value || std::atoi(value) != 0;
+    }();
+    return enabled && n_queries > GGML_VK_VPLANE_MAX_QUERY_ROWS &&
+        n_queries <= GGML_VK_VPLANE_MAX_PREFILL_ROWS;
+}
+
 static int64_t kv_tail_slot_stride(int64_t n_kv, uint32_t n_queries, bool token32) {
     static const bool reference = [] {
         const char * value = std::getenv("LLAMA_VPLANE_TAIL_REFERENCE");
@@ -805,8 +814,14 @@ static int64_t kv_vplane_map_size(const llama_kv_cache_context * cache, uint32_t
         return value ? int(std::atoi(value) != 0) : -1;
     }();
     const bool mask_tiles = mask_tiles_override < 0 ? cache->type_v() == GGML_TYPE_Q4_0 : mask_tiles_override != 0;
+    static const bool prefill_mask_tiles = [] {
+        const char * value = std::getenv("LLAMA_VPLANE_PREFILL_MASK_TILES");
+        return !value || std::atoi(value) != 0;
+    }();
     const int64_t tiles = cache->get_n_kv() / 32;
-    return mask_tiles && !cache->has_tail() && n_queries <= GGML_VK_VPLANE_MAX_QUERY_ROWS
+    const bool classify = (mask_tiles && n_queries <= GGML_VK_VPLANE_MAX_QUERY_ROWS) ||
+        (prefill_mask_tiles && kv_vplane_prefill(n_queries));
+    return classify && !cache->has_tail()
         ? tiles * (1 + n_queries) : tiles;
 }
 
@@ -3160,12 +3175,14 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                     break;
                 }
             }
-        } else if (vplane && q->ne[1] <= GGML_VK_VPLANE_MAX_QUERY_ROWS) {
+        } else if (vplane && (q->ne[1] <= GGML_VK_VPLANE_MAX_QUERY_ROWS || kv_vplane_prefill(q->ne[1]))) {
             if (sinks || v_mla || n_kv_max != 0 || hparams.f_max_alibi_bias != 0.0f || softcap != 0.0f) {
                 throw std::runtime_error("Unsupported token32 attention options");
             }
             const int bits = k->type == GGML_TYPE_Q4_0 ? 4 : 8;
-            cur = ggml_vk_flash_attn_vplane(ctx0, q, k, vplane, kq_mask, bits, kq_scale, GGML_VK_VPLANE_CACHE_GROUPS, vplane_scratch, vplane_map);
+            cur = ggml_vk_flash_attn_vplane(ctx0, q, k, vplane, kq_mask, bits, kq_scale,
+                                          GGML_VK_VPLANE_CACHE_GROUPS, vplane_scratch, vplane_map,
+                                          false, kv_vplane_prefill(q->ne[1]));
             auto * storage = vplane->view_src;
             GGML_ASSERT(storage && storage->buffer);
             auto * owner = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(storage->buffer));
@@ -3771,7 +3788,7 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * v = nullptr;
     if (!tiles) {
         v = use_kv_cur ? v_cur : mctx_cur->get_v(ctx0, il);
-    } else if (!tail_slots && n_tokens > GGML_VK_VPLANE_MAX_QUERY_ROWS) {
+    } else if (!tail_slots && n_tokens > GGML_VK_VPLANE_MAX_QUERY_ROWS && !kv_vplane_prefill(n_tokens)) {
         GGML_ASSERT(vplane && scratch && tile_map);
         auto * unpacked = ggml_vk_vplane_gather_v8(ctx0, vplane, tile_map, scratch);
         v = ggml_reshape_3d(ctx0, unpacked, 256, 2, unpacked->ne[1]);

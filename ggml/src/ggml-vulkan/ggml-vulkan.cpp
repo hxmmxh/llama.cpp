@@ -8981,8 +8981,11 @@ static void ggml_vk_flash_attn_ext_tail(ggml_backend_vk_context * ctx, vk_contex
 
 static bool ggml_vk_vplane_supported(const vk_device & device, const ggml_tensor * op) {
     const int bits = op->op_params[6];
-    const int64_t max_rows = op->src[9] ? GGML_VK_VPLANE_MAX_TAIL_ROWS : GGML_VK_VPLANE_MAX_QUERY_ROWS;
+    const bool prefill = op->op_params[9] == 1;
+    const int64_t max_rows = prefill ? GGML_VK_VPLANE_MAX_PREFILL_ROWS :
+        (op->src[9] ? GGML_VK_VPLANE_MAX_TAIL_ROWS : GGML_VK_VPLANE_MAX_QUERY_ROWS);
     if (op->op_params[5] != GGML_VK_VPLANE_TAG ||
+        (op->op_params[9] != 0 && !prefill) || (prefill && op->src[9]) ||
         !ggml_vk_vplane_inputs(op->src[0], op->src[1], op->src[2], op->src[3], bits, max_rows) ||
         !ggml_vk_vplane_masked_v_inputs(op->src[5], op->src[6], op->src[1], op->src[3]) ||
         op->src[4] || op->type != GGML_TYPE_F32 ||
@@ -9249,6 +9252,7 @@ static void ggml_vk_flash_attn_impl(ggml_backend_vk_context * ctx, vk_context & 
         if (dst->src[5])       { fa_pipeline_state.flags |= GGML_VK_FA_VPLANE_MASKED_F16; }
         if (dst->src[6])       { fa_pipeline_state.flags |= GGML_VK_FA_VPLANE_F16_TILE_MAP; }
         if (dst->src[9])       { fa_pipeline_state.flags |= GGML_VK_FA_VPLANE_TAIL; }
+        if (dst->op_params[9] == 1) { fa_pipeline_state.flags |= GGML_VK_FA_VPLANE_PREFILL; }
         if (dst->src[6] && dst->src[6]->ne[0] > KV / 32) {
             fa_pipeline_state.flags |= GGML_VK_FA_VPLANE_MASK_TILES;
         }
@@ -9322,6 +9326,9 @@ static void ggml_vk_flash_attn_impl(ggml_backend_vk_context * ctx, vk_context & 
 
     if (vplane) {
         split_k = ggml_vk_vplane_tuning(KV, neq1, dst->op_params[6], dst->op_params[7]).splits;
+        if (dst->op_params[9] == 1) {
+            split_k = 1;
+        }
     }
     if (!use_sparse && split_k > 1) {
         // Try to evenly split KV into split_k chunks, but it needs to be a multiple

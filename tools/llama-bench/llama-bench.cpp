@@ -349,6 +349,7 @@ struct cmd_params {
     ggml_type type_k_swa = GGML_TYPE_F16;
     ggml_type type_v_swa = GGML_TYPE_F16;
     bool kv_v_token32 = true;
+    int kv_tail_tokens = 0;
     std::vector<int>                 n_threads;
     std::vector<std::string>         cpu_mask;
     std::vector<bool>                cpu_strict;
@@ -379,6 +380,7 @@ struct cmd_params {
     bool                             no_warmup;
     output_formats                   output_format;
     output_formats                   output_format_stderr;
+    std::string                      prefill_check_prefix;
 };
 
 static const cmd_params cmd_params_defaults = {
@@ -398,6 +400,7 @@ static const cmd_params cmd_params_defaults = {
     /* type_k_swa           */ GGML_TYPE_F16,
     /* type_v_swa           */ GGML_TYPE_F16,
     /* kv_v_token32         */ true,
+    /* kv_tail_tokens       */ 0,
     /* n_threads            */ { common_cpu_get_num_math() },
     /* cpu_mask             */ { "0x0" },
     /* cpu_strict           */ { false },
@@ -428,6 +431,7 @@ static const cmd_params cmd_params_defaults = {
     /* no_warmup            */ false,
     /* output_format        */ MARKDOWN,
     /* output_format_stderr */ NONE,
+    /* prefill_check_prefix */ "",
 };
 
 static void print_usage(int /* argc */, char ** argv) {
@@ -473,6 +477,8 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  --kv-v-token32, --no-kv-v-token32                 (default: enabled on compatible caches)\n");
     printf("  --cache-type-k-swa <t>                          (default: f16)\n");
     printf("  --cache-type-v-swa <t>                          (default: f16)\n");
+    printf("  --kv-tail-tokens <n>                            (default: 0)\n");
+    printf("  --prefill-check-prefix <path>                   save final logits outside timing; prompt seed 1234 + repeat\n");
     printf("  -ctk, --cache-type-k <t>                          (default: %s)\n", join(transform_to_str(cmd_params_defaults.type_k, ggml_type_name), ",").c_str());
     printf("  -ctv, --cache-type-v <t>                          (default: %s)\n", join(transform_to_str(cmd_params_defaults.type_v, ggml_type_name), ",").c_str());
     printf("  -t, --threads <n>                                 (default: %s)\n", join(cmd_params_defaults.n_threads, ",").c_str());
@@ -643,6 +649,13 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 params.n_ubatch.insert(params.n_ubatch.end(), p.begin(), p.end());
             } else if (arg == "--kv-v-token32" || arg == "--no-kv-v-token32") {
                 params.kv_v_token32 = arg == "--kv-v-token32";
+            } else if (arg == "--kv-tail-tokens") {
+                if (++i >= argc) { invalid_param = true; break; }
+                params.kv_tail_tokens = std::stoi(argv[i]);
+                if (params.kv_tail_tokens < 0) { invalid_param = true; break; }
+            } else if (arg == "--prefill-check-prefix") {
+                if (++i >= argc) { invalid_param = true; break; }
+                params.prefill_check_prefix = argv[i];
             } else if (arg == "--cache-type-k-swa" || arg == "--cache-type-v-swa") {
                 if (++i >= argc) { invalid_param = true; break; }
                 const auto type = ggml_type_from_name(argv[i]);
@@ -1237,6 +1250,7 @@ struct cmd_params_instance {
     ggml_type          type_k_swa;
     ggml_type          type_v_swa;
     bool               kv_v_token32;
+    int                kv_tail_tokens;
     int                n_threads;
     std::string        cpu_mask;
     bool               cpu_strict;
@@ -1333,6 +1347,7 @@ struct cmd_params_instance {
         cparams.type_k_swa      = type_k_swa;
         cparams.type_v_swa      = type_v_swa;
         cparams.kv_v_token32    = kv_v_token32;
+        cparams.kv_tail_tokens  = kv_tail_tokens;
         cparams.offload_kqv     = !no_kv_offload;
         cparams.flash_attn_type = flash_attn;
         cparams.embeddings      = embeddings;
@@ -1391,6 +1406,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .type_k_swa            = */ params.type_k_swa,
                 /* .type_v_swa            = */ params.type_v_swa,
                 /* .kv_v_token32          = */ params.kv_v_token32,
+                /* .kv_tail_tokens        = */ params.kv_tail_tokens,
                 /* .n_threads             = */ nt,
                 /* .cpu_mask              = */ cm,
                 /* .cpu_strict            = */ cs,
@@ -1432,6 +1448,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .type_k_swa            = */ params.type_k_swa,
                 /* .type_v_swa            = */ params.type_v_swa,
                 /* .kv_v_token32          = */ params.kv_v_token32,
+                /* .kv_tail_tokens        = */ params.kv_tail_tokens,
                 /* .n_threads             = */ nt,
                 /* .cpu_mask              = */ cm,
                 /* .cpu_strict            = */ cs,
@@ -1473,6 +1490,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .type_k_swa            = */ params.type_k_swa,
                 /* .type_v_swa            = */ params.type_v_swa,
                 /* .kv_v_token32          = */ params.kv_v_token32,
+                /* .kv_tail_tokens        = */ params.kv_tail_tokens,
                 /* .n_threads             = */ nt,
                 /* .cpu_mask              = */ cm,
                 /* .cpu_strict            = */ cs,
@@ -1522,6 +1540,7 @@ struct test {
     ggml_type                type_v;
     ggml_type                type_k_swa;
     ggml_type                type_v_swa;
+    int                      kv_tail_tokens;
     int                      n_gpu_layers;
     int                      n_cpu_moe;
     llama_split_mode         split_mode;
@@ -1565,6 +1584,7 @@ struct test {
         type_v         = inst.type_v;
         type_k_swa     = inst.type_k_swa == GGML_TYPE_COUNT ? type_k : inst.type_k_swa;
         type_v_swa     = inst.type_v_swa == GGML_TYPE_COUNT ? type_v : inst.type_v_swa;
+        kv_tail_tokens = inst.kv_tail_tokens;
         n_gpu_layers   = inst.n_gpu_layers;
         n_cpu_moe      = inst.n_cpu_moe;
         split_mode     = inst.split_mode;
@@ -1641,7 +1661,7 @@ struct test {
             "tensor_buft_overrides",            "load_mode",     "lazy_mode",
             "embeddings",
             "no_op_offload",  "no_host",        "repack",        "fit_target",    "fit_min_ctx",
-            "n_prompt",       "n_gen",          "n_depth",
+            "n_prompt",       "n_gen",          "n_depth",      "kv_tail_tokens",
             "test_time",      "avg_ns",         "stddev_ns",     "avg_ts",         "stddev_ts"
         };
         return fields;
@@ -1654,7 +1674,7 @@ struct test {
             field == "poll" || field == "model_size" || field == "model_n_params" || field == "n_gpu_layers" ||
             field == "main_gpu" || field == "n_prompt" || field == "n_gen" || field == "n_depth" || field == "avg_ns" ||
             field == "stddev_ns" || field == "no_op_offload" || field == "n_cpu_moe" ||
-            field == "fit_target" || field == "fit_min_ctx" || field == "flash_attn") {
+            field == "fit_target" || field == "fit_min_ctx" || field == "flash_attn" || field == "kv_tail_tokens") {
             return INT;
         }
         if (field == "f16_kv" || field == "no_kv_offload" || field == "cpu_strict" ||
@@ -1746,6 +1766,7 @@ struct test {
                                             std::to_string(n_prompt),
                                             std::to_string(n_gen),
                                             std::to_string(n_depth),
+                                            std::to_string(kv_tail_tokens),
                                             test_time,
                                             std::to_string(avg_ns()),
                                             std::to_string(stdev_ns()),
@@ -2495,6 +2516,9 @@ int llama_bench(int argc, char ** argv) {
                 }
 
                 if (!is_cached) {
+                    if (!params.prefill_check_prefix.empty()) {
+                        std::srand(4321u);
+                    }
                     if (params.progress) {
                         fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d\n", params_idx, params_count,
                                 i + 1, params.reps);
@@ -2519,6 +2543,10 @@ int llama_bench(int argc, char ** argv) {
                 }
             }
 
+            const bool check_prefill = !params.prefill_check_prefix.empty() && t.n_prompt > 0 && t.n_gen == 0;
+            if (check_prefill) {
+                std::srand(1234u + i);
+            }
             uint64_t t_start = get_time_ns();
 
             if (t.n_prompt > 0) {
@@ -2550,6 +2578,32 @@ int llama_bench(int argc, char ** argv) {
 
             uint64_t t_ns = get_time_ns() - t_start;
             t.samples_ns.push_back(t_ns);
+            if (check_prefill) {
+                const float * logits = llama_get_logits_ith(ctx, -1);
+                const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(lmodel));
+                if (!logits || std::any_of(logits, logits + n_vocab, [](float v) { return !std::isfinite(v); })) {
+                    fprintf(stderr, "%s: nonfinite or missing prefill logits\n", __func__);
+                    exit(1);
+                }
+                const std::string path = params.prefill_check_prefix + "-" + std::to_string(params_idx) + "-" + std::to_string(i) + ".bin";
+                FILE * existing = fopen(path.c_str(), "rb");
+                if (existing) {
+                    fclose(existing);
+                    fprintf(stderr, "%s: prefill logits output already exists: %s\n", __func__, path.c_str());
+                    exit(1);
+                }
+                FILE * output = fopen(path.c_str(), "wb");
+                if (!output) {
+                    fprintf(stderr, "%s: cannot create prefill logits output: %s\n", __func__, path.c_str());
+                    exit(1);
+                }
+                const bool written = fwrite(logits, sizeof(float), n_vocab, output) == size_t(n_vocab);
+                const int closed = fclose(output);
+                if (!written || closed != 0) {
+                    fprintf(stderr, "%s: cannot write complete prefill logits\n", __func__);
+                    exit(1);
+                }
+            }
         }
 
         if (p) {
