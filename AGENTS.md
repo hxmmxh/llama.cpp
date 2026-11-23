@@ -1,5 +1,9 @@
 # Instructions for llama.cpp
 
+## Local fork release packaging
+
+For this private fork, use `tools/distribution/vulkan/package.py` to package verified Windows Vulkan builds after engine updates. See `tools/distribution/vulkan/PACKAGING.zh-CN.md`. Keep launchers, default prefill assets, and licenses in that directory as the source of truth. Default output is `../dist` next to this repository. Preserve native build and startup hash checks, and run the local packaging tests after changes. Do not alter the raw template bytes without updating its metadata.
+
 > [!IMPORTANT]
 >
 > AI-generated code is allowed. What is **not** allowed is submitting code you do not understand. You are 100% responsible for every line, however it was produced.

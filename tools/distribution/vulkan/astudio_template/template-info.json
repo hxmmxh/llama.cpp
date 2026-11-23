@@ -1,0 +1,13 @@
+{
+  "file": "template.txt",
+  "format": "model-rendered prompt prefix",
+  "bytes": 110436,
+  "sha256": "1bd3838f3e155d7e069db904ca8aa16dc84c4b733b5b83ed408993b8d92b8e1f",
+  "default_prefill_newlines": "lf",
+  "reference_token_counts": {
+    "lf": 25209,
+    "original_crlf": 25806
+  },
+  "reference_model": "Spark-X2.6-1.7B",
+  "reference_validation": "20261120-181358-prefill-release-deploy"
+}

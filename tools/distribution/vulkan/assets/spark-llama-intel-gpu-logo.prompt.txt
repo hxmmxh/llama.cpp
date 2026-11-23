@@ -1,0 +1,10 @@
+Generated using the built-in image_gen tool.
+References: spark_mlx_llm_dev/docs/assets/spark-mlx-logo.png and spark-vllm-ascend-logo.png.
+
+Use case: logo-brand.
+Asset type: a transparent PNG horizontal logo lockup for the README and Windows release package of an open-source inference project.
+Reference image 1 (spark-mlx-logo.png) is the Spark emblem and style reference. Reference image 2 (spark-vllm-ascend-logo.png) is an additional reference for the clean horizontal lockup and restrained brand colors. Create a new logo, not an MLX or Ascend logo.
+Preserve the recognizable purple Spark emblem on the left: four large rounded points, four smaller diagonal points, and a central four-point star-shaped transparent cutout. Match its purple gradient, clean geometry and antialiased edges.
+To the right, use a bold, clean charcoal sans-serif wordmark with exact primary text: "llama.cpp Spark". Make the lowercase spelling and two dots in "llama.cpp" precise. Beneath it, place the exact smaller text "INTEL GPU EDITION" in Intel-like cyan blue, with a restrained small GPU-chip outline integrated beside that subtitle. The words Spark, llama.cpp, and Intel GPU must all be clearly readable. The entire logo must read as one cohesive family with the references.
+Composition: wide approximately 3:1 canvas, ideally 2400x800; logo optically centered; balanced spacing, modest outer padding, all content fully visible. Flat, vector-friendly brand artwork. No mascot or illustration, no 3D, no drop shadow, no photographic texture.
+Background must have real transparent alpha, including the star cutout and the spaces in the letters. No painted checkerboard, no white rectangle. No MLX text, vLLM, Ascend, extra slogan, watermark, or official Intel oval. Designed to be crisp on a light README background.

@@ -1,0 +1,23 @@
+@echo off
+setlocal
+rem All paths are supplied by the release preparation script.
+if not defined RELEASE_RUN exit /b 87
+if not defined RELEASE_SOURCE exit /b 87
+if not defined RELEASE_BUILD exit /b 87
+if not defined RELEASE_COMMIT exit /b 87
+if not defined RELEASE_NUMBER exit /b 87
+if not defined RELEASE_VCVARS exit /b 87
+if not defined RELEASE_CMAKE exit /b 87
+if not defined RELEASE_NINJA_DIR exit /b 87
+if not defined VULKAN_SDK exit /b 87
+call "%RELEASE_VCVARS%"
+if errorlevel 1 exit /b %errorlevel%
+set "PATH=%VULKAN_SDK%\Bin;%RELEASE_NINJA_DIR%;%PATH%"
+"%RELEASE_CMAKE%" -S "%RELEASE_SOURCE%" -B "%RELEASE_BUILD%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_PREFIX_PATH="%VULKAN_SDK%" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DGGML_VULKAN=ON -DGGML_SYCL=OFF -DGGML_OPENVINO=OFF -DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=OFF -DGGML_AVX2=ON -DGGML_AVX512=OFF -DGGML_AVX_VNNI=OFF -DGGML_OPENMP=ON -DLLAMA_BUILD_COMMIT=%RELEASE_COMMIT% -DLLAMA_BUILD_NUMBER=%RELEASE_NUMBER% -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_OPENSSL=OFF > "%RELEASE_RUN%\configure.log" 2>&1
+set "CONFIGURE_CODE=%errorlevel%"
+> "%RELEASE_RUN%\configure.exitcode" echo %CONFIGURE_CODE%
+if not "%CONFIGURE_CODE%"=="0" exit /b %CONFIGURE_CODE%
+"%RELEASE_CMAKE%" --build "%RELEASE_BUILD%" --parallel 2 --target llama-cli llama-server llama-bench > "%RELEASE_RUN%\build.log" 2>&1
+set "BUILD_CODE=%errorlevel%"
+> "%RELEASE_RUN%\build.exitcode" echo %BUILD_CODE%
+exit /b %BUILD_CODE%
