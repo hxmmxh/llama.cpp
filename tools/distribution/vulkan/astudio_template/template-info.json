@@ -1,13 +1,25 @@
 {
   "file": "template.txt",
   "format": "model-rendered prompt prefix",
-  "bytes": 110436,
-  "sha256": "1bd3838f3e155d7e069db904ca8aa16dc84c4b733b5b83ed408993b8d92b8e1f",
+  "bytes": 110022,
+  "sha256": "614bdd5b380380d1dc949eb41325db6d528f74db08bf79300413ae3675403426",
   "default_prefill_newlines": "lf",
   "reference_token_counts": {
-    "lf": 25209,
-    "original_crlf": 25806
+    "lf": 25080,
+    "original_crlf": 25671
   },
   "reference_model": "Spark-X2.6-1.7B",
-  "reference_validation": "20261120-181358-prefill-release-deploy"
+  "reference_validation": "20261124-104750-template-sites17",
+  "reference_validation_scope": "Rendered and tokenized exact-prefix check against the captured real client request; no new model generation",
+  "captured_at": "2026-11-24T10:49:26.118501+08:00",
+  "source_request": "AStudio 2026-11-24 task53, final user question excluded",
+  "fixed_snapshot": {
+    "sites_skills_version": "1.0.17"
+  },
+  "excludes": [
+    "environment_context_contents",
+    "final_user_question",
+    "assistant_generation_prefix"
+  ],
+  "prefix_boundary": "</INSTRUCTIONS><environment_context>"
 }

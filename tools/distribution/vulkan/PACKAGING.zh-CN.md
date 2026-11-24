@@ -56,6 +56,10 @@ HTTP server 默认在启动时预热模板，采用 128K 上下文及输出预�
 
 更换默认模板时，同步 `template-info.json` 的 `bytes` 和 `sha256`。模板中的日期、路径和工具说明是固定内容，不会随打包自动更新。Git 属性和编辑器配置会保护模板的原始字节及 CRLF。
 
+`astudio_template/` 已受本仓库 Git 管理，是默认模板的唯一源文件。客户端更新后，先通过服务的 `/apply-template` 渲染真实请求，去掉最后一条具体提问及回复生成标记，再用 `/tokenize` 验证模板是该请求的逐 token 前缀；相同 token 数不代表内容匹配。
+
+当前模板截到 `</INSTRUCTIONS><environment_context>` 开头标记，排除其后的路径、日期、时区、权限等环境字段。客户端仍发送完整请求，动态环境作为尾部 prefill。截断位置须通过 token 前缀检查，避免边界处的 BPE 合并导致最后一个 token 不匹配。
+
 ## 本地检查
 
 从仓库根目录运行：

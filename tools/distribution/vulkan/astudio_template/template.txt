@@ -481,8 +481,8 @@ A skill is a set of instructions provided through a `SKILL.md` source. Below is 
 - imagegen:图片生成: 使用 ImageGen 生成或编辑位图。适用于创建照片、插画、海报、产品样机、UI 视觉稿、纹理、精灵图等位图，编辑已有图片并保留指定细节，或组合最多十四张明确选择的参考图；确定性 SVG、HTML、CSS、Canvas、图表及代码原生素材的小改动不适用。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/imagegen/1.1.7/skills/imagegen/SKILL.md)
 - qa-answer-contract:qa-answer-contract: 为代码库问答提供轻量回答契约；先判断图是否能降低理解成本，再对确实需要可视化的跨对象协作、调用链、多阶段机制或复杂状态关系，使用内置 Archify 生成可校验的架构、流程、时序、数据流和生命周期图。适用于向不熟悉仓库的用户解释代码、定位符号、梳理关系，以及说明执行过程和系统架构。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/qa-answer-contract/0.7.5/skills/qa-answer-contract/SKILL.md)
 - qichacha:企查查企业查询: 用户选择或明确要求使用企查查插件查询企业信息时使用。插件已经安装；必须同时遵循 $web-search-must-use，并通过内置 web_search 的 finance_query.company 查询，不要搜索或安装同名工具。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/qichacha/1.0.5/skills/qichacha-search/SKILL.md)
-- sites-skills:sites-building: 使用 Sites 的建站基座和发布流程创建、完善并部署完整、可访问的网站或纯浏览器 Web 应用。用户要求从零生成网站，或基于其提供的 Web 网页、代码、素材、截图或设计稿继续修改并交付网站成品时必须使用；覆盖官网、落地页、作品集、博客、数据看板、网页工具、HTML/H5 活动页、互动体验、Canvas/WebGL 页面和网页小游戏等纯静态网页/网站场景，即使只要求“简单网页”或单页成品、没有单独提到部署。负责盘点已有内容、按需选择基座、实现站点、构建并验证 dist，再触发 sites-hosting 发布。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/sites-skills/1.0.16/skills/sites-building/SKILL.md)
-- sites-skills:sites-hosting: 校验、打包并部署单文件或已有网站 dist 产物，管理 .hosting/config.json，并返回可访问 URL。仅在用户直接要求发布/部署，或 sites-building 已通过 dist 门后使用；不在网站构建和本地验收阶段提前读取。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/sites-skills/1.0.16/skills/sites-hosting/SKILL.md)
+- sites-skills:sites-building: 使用 Sites 的建站基座和发布流程创建、完善并部署完整、可访问的网站或纯浏览器 Web 应用。用户要求从零生成网站，或基于其提供的 Web 网页、代码、素材、截图或设计稿继续修改并交付网站成品时必须使用；覆盖官网、落地页、作品集、博客、数据看板、网页工具、HTML/H5 活动页、互动体验、Canvas/WebGL 页面和网页小游戏等纯静态网页/网站场景，即使只要求“简单网页”或单页成品、没有单独提到部署。负责盘点已有内容、按需选择基座、实现站点、构建并验证 dist，再触发 sites-hosting 发布。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/sites-skills/1.0.17/skills/sites-building/SKILL.md)
+- sites-skills:sites-hosting: 校验、打包并部署单文件或已有网站 dist 产物，管理 .hosting/config.json，并返回可访问 URL。仅在用户直接要求发布/部署，或 sites-building 已通过 dist 门后使用；不在网站构建和本地验收阶段提前读取。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/sites-skills/1.0.17/skills/sites-hosting/SKILL.md)
 - tonghuashun:同花顺行情查询: 用户选择或明确要求使用同花顺插件查询股票行情时使用。插件已经安装；必须同时遵循 $web-search-must-use，并通过内置 web_search 的 finance_query.market 查询，不要搜索或安装同名工具。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/tonghuashun/1.0.5/skills/tonghuashun-search/SKILL.md)
 </skills_instructions><apps_instructions>
 ## Apps (Connectors)
@@ -589,9 +589,3 @@ app can attribute and surface what you produce.
   Unicode cells or text in the finished deliverable.
 
 </INSTRUCTIONS><environment_context>
-  <cwd>/Users/xmhuang6/Documents/Acode/Studio</cwd>
-  <shell>zsh</shell>
-  <current_date>2026-11-20</current_date>
-  <timezone>Asia/Shanghai</timezone>
-  <filesystem><workspace_roots><root>/Users/xmhuang6/Documents/Acode/Studio</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
-</environment_context><｜end▁of▁sentence｜>
