@@ -19,7 +19,7 @@ WORKSPACE = REPOSITORY.parent
 DEFAULT_OUTPUT = WORKSPACE / 'dist'
 PROJECT_NAME = 'llama.cpp Spark Intel GPU Edition'
 LAUNCHERS = ('run.ps1', 'run-cli.cmd', 'run-server.cmd', 'check-vulkan.cmd')
-TEMPLATE_FILES = ('template.txt', 'template-info.json', 'README.txt')
+TEMPLATE_FILES = ('template.txt', 'title.txt', 'template-info.json', 'README.txt')
 BRANDING_FILES = ('assets/spark-llama-intel-gpu-logo.png',)
 SYSTEM_DLLS = {
     'advapi32.dll', 'avrt.dll', 'bcrypt.dll', 'cfgmgr32.dll', 'combase.dll',
@@ -69,6 +69,19 @@ def load_default_template(directory):
         raise ValueError('Default prompt template is empty')
     if len(data) != info['bytes'] or digest(data) != info['sha256']:
         raise ValueError('Default prompt template identity changed')
+    title = (directory / 'title.txt').read_bytes()
+    if len(title) != info['title']['bytes'] or digest(title) != info['title']['sha256']:
+        raise ValueError('Default title template identity changed')
+    if not title.decode('utf-8').endswith(info['title']['prefix_boundary']):
+        raise ValueError('Default title template boundary mismatch')
+    stages = info['main_stages']
+    cuts = [stage['bytes'] for stage in stages]
+    if len(cuts) != 3 or not 0 < cuts[0] < cuts[1] < cuts[2] == len(data):
+        raise ValueError('Expected three increasing main template boundaries')
+    if not (data[cuts[0]:].startswith('<｜start▁of▁sentence｜><|System|>'.encode()) and
+            data[cuts[1]:].startswith('<｜start▁of▁sentence｜><|User|>'.encode()) and
+            data.endswith(info['prefix_boundary'].encode())):
+        raise ValueError('Main template stage boundary mismatch')
     return data
 
 
@@ -132,10 +145,16 @@ def main():
         raise ValueError('Missing startup validation')
     template_dir = args.template_dir.resolve()
     template_data = load_default_template(template_dir)
+    template_info = read_json(template_dir / 'template-info.json')
     tested_files = {item['path']: item for item in startup['files']}
     for item in native['runtime_files']:
         if tested_files.get(item['path'], {}).get('sha256') != item['sha256']:
             raise ValueError(f'Runtime differs from the tested file: {item["path"]}')
+    if startup.get('model_inference_tested', False):
+        for name in TEMPLATE_FILES:
+            tested = tested_files.get(f'astudio_template/{name}', {})
+            if digest((template_dir / name).read_bytes()) != tested.get('sha256'):
+                raise ValueError(f'Prefill asset differs from the tested file: {name}')
     output_dir = args.output_dir.expanduser().resolve()
     destination = output_dir / args.version
     if destination.exists() or destination.is_symlink():
@@ -227,11 +246,14 @@ def main():
                 backend='Vulkan', cpu_minimum='AVX2/FMA/F16C', native_build=native,
                 startup_validation=startup, pe_verification=pe_records,
                 external_runtime_requirements=['Windows 11 x64', 'Vulkan-capable GPU driver with vulkan-1.dll'],
-                models_included=False, model_inference_tested=False, performance_tested=False,
+                models_included=False, model_inference_tested=startup.get('model_inference_tested', False),
+                performance_tested=False,
                 default_prefill=dict(enabled=True, file='astudio_template/template.txt',
                                      bytes=len(template_data), sha256=digest(template_data),
                                      newlines='lf', input_format='rendered_prompt',
-                                     tokenization=dict(add_special=False, parse_special=True)),
+                                     tokenization=dict(add_special=False, parse_special=True),
+                                     main_stages=template_info['main_stages'],
+                                     title=dict(template_info['title'], file='astudio_template/title.txt')),
                 files=[record(p, payload) for p in sorted(payload.rglob('*')) if p.is_file()])
             (payload / 'version.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n')
             archive = release / (args.version + '.zip')

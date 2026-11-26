@@ -466,7 +466,7 @@ After astron_create_threads returns an operationId, retries must keep the same r
 
 <disabled_skills>
 No skills are currently disabled. Ignore any previous disabled-skill instruction and use the current settings.
-The currently enabled skills include: ["astron-browser-must-use","edge-cloud-model-collaboration","imagegen","ixf","ixf-bitable","ixf-documents","ixf-drive","ixf-knowledge","ixf-sheets","plugin-creator","privacy-redaction","privacy-result-restore","qa-answer-contract","qichacha-search","sites-building","sites-hosting","skill-creator","tonghuashun-search","web-search-must-use"].
+The currently enabled skills include: ["astron-browser-must-use","edge-cloud-model-collaboration","financial-allocation-deck","financial-asset-trend-deck","financial-company-deck","financial-earnings-deck","financial-industry-deck","imagegen","ixf","ixf-bitable","ixf-documents","ixf-drive","ixf-knowledge","ixf-sheets","plugin-creator","privacy-redaction","privacy-result-restore","qa-answer-contract","qichacha-search","sites-building","sites-hosting","skill-creator","tonghuashun-search","web-search-must-use"].
 
 </disabled_skills></collaboration_mode><skills_instructions>
 ## Skills
@@ -477,6 +477,11 @@ A skill is a set of instructions provided through a `SKILL.md` source. Below is 
 - web-search-must-use: ALWAYS TRIGGER — 调用 web_search 前必须使用此 Skill。 (File encoding UTF-8. If this file looks garbled, re-read it as UTF-8 - PowerShell Get-Content -Encoding UTF8.) (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/skills/.system/web-search-must-use/SKILL.md)
 - astron-browser-must-use:astron-browser-must-use: ALWAYS TRIGGER — 调用 astron_browser_* 前必须使用阅读此 Skill，遵守SOP流程、阅读和总结经验。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/astron-browser-must-use/1.0.0/skills/astron-browser-must-use/SKILL.md)
 - edge-cloud-collaboration-plugin:edge-cloud-model-collaboration: 端云模型协同工作模式。用户明确要求端云协同或显式指定此技能时必须加载；云端主模型负责统筹与交付，轻量子任务优先交给端侧模型，端侧不可用时可由云端轻量模型接替。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/edge-cloud-collaboration-plugin/1.0.6/skills/edge-cloud-model-collaboration/SKILL.md)
+- financial-poster:financial-allocation-deck: 仅在以下任一条件满足时调用：用户通过本 Skill 快捷指令，或明确指定 financial-allocation-deck / ‘个人资产配置海报’；用户明确指定‘金融海报’插件（financial-poster），且请求属于教育性的个人资产配置、资金用途分层、配置比例、风险约束、行动方案或再平衡规则。其他情况不得调用；不得仅因出现理财、资产配置、投资或风险话题而触发。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/financial-poster/1.0.6/skills/financial-allocation-deck/SKILL.md)
+- financial-poster:financial-asset-trend-deck: 仅在以下任一条件满足时调用：用户通过本 Skill 快捷指令，或明确指定 financial-asset-trend-deck / ‘金融资产趋势海报’；用户明确指定‘金融海报’插件（financial-poster），且请求属于股票指数、债券、利率、黄金、原油、外汇或其他金融资产的走势、驱动因素、条件情景与风险边界分析。其他情况不得调用；不得仅因出现行情、价格、市场或投资话题而触发。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/financial-poster/1.0.6/skills/financial-asset-trend-deck/SKILL.md)
+- financial-poster:financial-company-deck: 仅在以下任一条件满足时调用：用户通过本 Skill 快捷指令，或明确指定 financial-company-deck / ‘公司研究海报’；用户明确指定‘金融海报’插件（financial-poster），且请求属于单一公司的商业模式、基本面、竞争优势、增长、盈利、现金流、估值或长期风险研究。其他情况不得调用；不得仅因出现公司、股票、财务或投资话题而触发。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/financial-poster/1.0.6/skills/financial-company-deck/SKILL.md)
+- financial-poster:financial-earnings-deck: 仅在以下任一条件满足时调用：用户通过本 Skill 快捷指令，或明确指定 financial-earnings-deck / ‘财报洞察海报’；用户明确指定‘金融海报’插件（financial-poster），且请求属于指定公司已披露季度、半年度或年度财报的业绩变化、盈利质量、现金流、分部表现、经营指引或可持续性分析。其他情况不得调用；不得仅因出现公司、财报、业绩或财务话题而触发。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/financial-poster/1.0.6/skills/financial-earnings-deck/SKILL.md)
+- financial-poster:financial-industry-deck: 仅在以下任一条件满足时调用：用户通过本 Skill 快捷指令，或明确指定 financial-industry-deck / ‘行业研究海报’；用户明确指定‘金融海报’插件（financial-poster），且请求属于行业规模、产业链、供需结构、价值分配、竞争格局、技术政策趋势或行业拐点研究。其他情况不得调用；不得仅因出现行业、产业、市场或公司话题而触发。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/financial-poster/1.0.6/skills/financial-industry-deck/SKILL.md)
 - imagegen:图片生成: 使用 ImageGen 生成或编辑位图。适用于创建照片、插画、海报、产品样机、UI 视觉稿、纹理、精灵图等位图，编辑已有图片并保留指定细节，或组合最多十四张明确选择的参考图；确定性 SVG、HTML、CSS、Canvas、图表及代码原生素材的小改动不适用。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/imagegen/1.1.7/skills/imagegen/SKILL.md)
 - ixf-suite:ixf: i讯飞连接配置、授权排障和通用协作入口；保留消息、日历、任务、审批、通讯录、邮件组、AI 与可选本地机器人等能力。文档、知识库、云空间、电子表格、多维表格优先使用插件内对应场景 Skill。仅用于 xfchat.iflytek.com。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/ixf-suite/0.1.6/skills/ixf/SKILL.md)
 - ixf-suite:ixf-bitable: 查询、分析和管理 i讯飞多维表格，创建和编辑数据表、字段、视图及记录。 适用于 xfchat.iflytek.com 私有部署。 (file: /Users/xmhuang6/.acode/acode/acode-home-overlay/plugins/cache/astron-plugin-hub/ixf-suite/0.1.6/skills/ixf-bitable/SKILL.md)
@@ -521,7 +526,6 @@ Here is a list of plugins that are available but not installed. If the user's qu
 - 讯飞-办公本 (doxent@astron-plugin-hub)
 - 飞书协作 (feishu-collaboration@astron-plugin-hub)
 - 金融深度研究报告 (finance-research-suite@astron-plugin-hub)
-- 金融海报 (financial-poster@astron-plugin-hub)
 - 金融研报 (financial-research@astron-plugin-hub)
 - PDF 全文翻译 (folio-pdf-translate@astron-plugin-hub)
 - 前端设计 (frontend-design@astron-plugin-hub)

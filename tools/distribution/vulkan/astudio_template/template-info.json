@@ -1,33 +1,53 @@
 {
   "file": "template.txt",
   "format": "model-rendered prompt prefix",
-  "bytes": 152996,
-  "sha256": "62bf3862a0c9d87fcbdadb2329607662dde2f8edcde820a5d96cc4c6d0f5f1b8",
+  "bytes": 156357,
+  "sha256": "4724c979426a81a8a5fbc3c365939f319de56ab482dbcb315f68496a5b1d0673",
   "default_prefill_newlines": "lf",
   "reference_token_counts": {
-    "lf": 35596,
-    "preserve": 35596
+    "lf": 36451,
+    "preserve": 36451
   },
   "reference_model": "Spark-X2.6-1.7B",
-  "reference_validation": "20261126-astudio-3.7.1-vulkan-render",
-  "reference_validation_scope": "The captured request was rendered by Vulkan /apply-template. The fixed prefix was matched token-for-token with /tokenize, and the full input count was checked on /v1/responses/input_tokens.",
-  "captured_at": "2026-11-26T06:47:18.318448+00:00",
-  "source_request": "AStudio new conversation with user prompt 你好; environment contents, final user question and assistant prefix excluded",
-  "source_template_sha256": "d3abffba678e9223df7e655f8da4428e38134da8eb8050e989695157ca6ba88e",
-  "fixed_snapshot": {
-    "astudio_version": "3.7.1",
-    "astudio_build": "2d99aec86b9f",
-    "sites_skills_version": "1.0.18"
-  },
+  "reference_validation": "20261126-191027-vulkan-three-stage",
+  "reference_validation_scope": "Captured 18083 rendered inputs, verified each token boundary and replayed the current template, a changed User 1, and the previous skill configuration.",
+  "captured_at": "2026-11-26T17:22:24.6828875+08:00",
+  "source_request": "AStudio new conversation with user prompt 你好",
   "excludes": [
     "environment_context_contents",
     "final_user_question",
     "assistant_generation_prefix"
   ],
   "prefix_boundary": "</INSTRUCTIONS><environment_context>",
-  "captured_request_tokens": 35732,
-  "verified_prefix_tokens": 35596,
+  "captured_request_tokens": 36587,
+  "verified_prefix_tokens": 36451,
   "remaining_tokens_for_captured_request": 136,
-  "captured_rendered_sha256": "2ee60492cb94a4c5ae818529412ed5114ad25a2974686bc0359eba3c51d74a9a",
-  "previous_template_sha256": "614bdd5b380380d1dc949eb41325db6d528f74db08bf79300413ae3675403426"
+  "captured_rendered_sha256": "a1c730d8ae532ed7f35ba66b866aa5dfa3893ee3cee9a9345c8d33486dd3bc64",
+  "previous_template_sha256": "62bf3862a0c9d87fcbdadb2329607662dde2f8edcde820a5d96cc4c6d0f5f1b8",
+  "main_stages": [
+    {
+      "name": "system1",
+      "bytes": 113394,
+      "reference_tokens": 26320
+    },
+    {
+      "name": "system1_system2",
+      "bytes": 150476,
+      "reference_tokens": 34795
+    },
+    {
+      "name": "system1_system2_user1_fixed",
+      "bytes": 156357,
+      "reference_tokens": 36451
+    }
+  ],
+  "title": {
+    "file": "title.txt",
+    "bytes": 10101,
+    "sha256": "d8880bc59be9bbdaaae9b32a1c28e7e130263fb653d77296a2581b80497fc566",
+    "prefix_boundary": "<environment_context>",
+    "reference_tokens": 2388,
+    "captured_request_tokens": 2753,
+    "captured_rendered_sha256": "a87864df55cdd3918d8609823e8570234addf5d3030b2b3566b201b934672909"
+  }
 }

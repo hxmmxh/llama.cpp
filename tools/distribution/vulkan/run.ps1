@@ -8,6 +8,7 @@ param(
     [string]$PrefillFile,
     [ValidateSet('lf', 'preserve')][string]$PrefillNewlines = 'lf',
     [switch]$SkipPrefill,
+    [switch]$SinglePrefill,
     [ValidateRange(1, 86400)][int]$PrefillTimeoutSec = 1800,
     [ValidateRange(512, 1048576)][int]$ContextSize = 8192,
     [ValidateRange(1, 1024)][int]$Threads = 12,
@@ -37,7 +38,32 @@ function Resolve-ModelFile([string]$Path) {
     return (Resolve-Path -LiteralPath $Path).ProviderPath
 }
 
-function Invoke-PrefilledServer([string[]]$NativeArguments, [string]$Prefix) {
+function Get-BundledPrefillSections([string]$TemplatePath) {
+    $dir = Split-Path -Parent $TemplatePath
+    $info = Get-Content -LiteralPath (Join-Path $dir 'template-info.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $main = [IO.File]::ReadAllBytes($TemplatePath)
+    $titlePath = Join-Path $dir 'title.txt'
+    $title = [IO.File]::ReadAllBytes($titlePath)
+    if ($main.Length -ne $info.bytes -or (Get-FileHash -LiteralPath $TemplatePath).Hash -ne $info.sha256 -or
+        $title.Length -ne $info.title.bytes -or (Get-FileHash -LiteralPath $titlePath).Hash -ne $info.title.sha256) {
+        throw 'Bundled prefill template identity changed.'
+    }
+    $stages = @($info.main_stages)
+    if ($stages.Count -ne 3 -or $stages[-1].bytes -ne $main.Length) {
+        throw 'Expected three main template stages ending at the full prefix.'
+    }
+    @{ Name = 'title'; Text = $utf8.GetString($title) }
+    $previous = 0
+    foreach ($stage in $stages) {
+        $length = [int]$stage.bytes
+        if ($length -le $previous -or $length -gt $main.Length) { throw 'Invalid main template stage boundary.' }
+        @{ Name = $stage.name; Text = $utf8.GetString($main, 0, $length) }
+        $previous = $length
+    }
+}
+
+function Invoke-PrefilledServer([string[]]$NativeArguments, [object[]]$Sections) {
     # Check the port before starting so prefill cannot reach an existing service.
     $listener = [Net.Sockets.TcpListener]::new($serverListenAddress, $Port)
     $listener.ExclusiveAddressUse = $true
@@ -73,35 +99,48 @@ function Invoke-PrefilledServer([string[]]$NativeArguments, [string]$Prefix) {
         if ($server.HasExited) { throw "Server exited before prefill (code $($server.ExitCode))." }
 
         # The input is already rendered. Token IDs avoid adding another template or BOS.
-        $tokenizeBody = @{
-            content = $Prefix
-            add_special = $false
-            parse_special = $true
-        } | ConvertTo-Json -Depth 4 -Compress
-        $tokenized = Invoke-RestMethod -Uri "$baseUri/tokenize" -Method Post `
-            -ContentType 'application/json; charset=utf-8' `
-            -Body ([Text.Encoding]::UTF8.GetBytes($tokenizeBody)) -TimeoutSec $PrefillTimeoutSec
-        $prefixTokens = @($tokenized.tokens)
-        if (-not $prefixTokens.Count) { throw 'Prefix tokenization returned no tokens.' }
-        $body = @{
-            id_slot = 0
-            prompt = $prefixTokens
-            n_predict = 0
-            cache_prompt = $true
-            stream = $false
-        } | ConvertTo-Json -Depth 4 -Compress
-        Write-Host "Prefilling prefix from $PrefillFile..."
-        $response = Invoke-RestMethod -Uri "$baseUri/completion" -Method Post `
-            -ContentType 'application/json; charset=utf-8' `
-            -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec $PrefillTimeoutSec
-        # This engine reports one sampled token for n_predict=0; it is not committed to KV.
-        # Discard that response text and validate the requested budget and cached input instead.
-        if (-not $response.timings -or $response.generation_settings.n_predict -ne 0 -or
-            $response.tokens_predicted -notin @(0, 1)) {
-            throw 'Invalid prefill response: expected a zero-budget completion.'
+        $prefixes = @(foreach ($section in $Sections) {
+            $text = $section.Text
+            if ($PrefillNewlines -eq 'lf') { $text = $text.Replace("`r`n", "`n") }
+            $tokenizeBody = @{content = $text; add_special = $false; parse_special = $true} | ConvertTo-Json -Depth 4 -Compress
+            $tokenized = Invoke-RestMethod -Uri "$baseUri/tokenize" -Method Post `
+                -ContentType 'application/json; charset=utf-8' `
+                -Body ([Text.Encoding]::UTF8.GetBytes($tokenizeBody)) -TimeoutSec $PrefillTimeoutSec
+            $ids = @($tokenized.tokens)
+            if (-not $ids.Count) { throw "Empty token sequence for $($section.Name)." }
+            @{ Name = $section.Name; Tokens = $ids }
+        })
+        # The title is independent. Each subsequent main stage must extend the previous one.
+        for ($i = 2; $i -lt $prefixes.Count; $i++) {
+            $prev = $prefixes[$i - 1].Tokens
+            $next = $prefixes[$i].Tokens
+            if ($prev.Count -ge $next.Count) { throw 'The main stage token counts must increase.' }
+            for ($j = 0; $j -lt $prev.Count; $j++) {
+                if ($prev[$j] -ne $next[$j]) { throw "Token boundary mismatch for $($prefixes[$i].Name)." }
+            }
         }
-        $count = $response.timings.prompt_n + $response.timings.cache_n
-        if ($count -ne $prefixTokens.Count) { throw 'Prefix prefill token count mismatch.' }
+        for ($i = 0; $i -lt $prefixes.Count; $i++) {
+            $entry = $prefixes[$i]
+            $body = @{id_slot = 0; prompt = $entry.Tokens; n_predict = 0; cache_prompt = $true; stream = $false} |
+                ConvertTo-Json -Depth 4 -Compress
+            Write-Host "Prefilling $($entry.Name)..."
+            $response = Invoke-RestMethod -Uri "$baseUri/completion" -Method Post `
+                -ContentType 'application/json; charset=utf-8' `
+                -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec $PrefillTimeoutSec
+            # The optional sampled token from a zero-budget request never enters the KV cache.
+            if (-not $response.timings -or $response.generation_settings.n_predict -ne 0 -or
+                $response.tokens_predicted -notin @(0, 1)) {
+                throw 'Invalid prefill response: expected a zero-budget completion.'
+            }
+            $cached = $response.timings.cache_n
+            $new = $response.timings.prompt_n
+            $count = $cached + $new
+            if ($count -ne $entry.Tokens.Count) { throw "Token count mismatch for $($entry.Name)." }
+            if ($i -ge 2 -and $cached -ne $prefixes[$i - 1].Tokens.Count) {
+                throw "Prefill stage $($entry.Name) did not reuse the previous stage."
+            }
+            Write-Host "Prefill $($entry.Name): $count tokens; cached=$cached; new=$new; prompt_ms=$($response.timings.prompt_ms)."
+        }
         Write-Host "Prefill complete: $count tokens in slot 0; prompt_ms=$($response.timings.prompt_ms)."
         Write-Host "HTTP API ready: $baseUri/v1"
         while (-not $server.WaitForExit(500)) { }
@@ -114,10 +153,12 @@ function Invoke-PrefilledServer([string[]]$NativeArguments, [string]$Prefix) {
 
 # Use the measured Arc 140T shader path for this release.
 $previousCoopmat = $env:GGML_VK_DISABLE_COOPMAT
+$previousResidentPrefixes = $env:LLAMA_SERVER_RESIDENT_PREFIXES
 $env:GGML_VK_DISABLE_COOPMAT = '1'
 try {
     if ($PrefillFile -and $Mode -ne 'server') { throw 'PrefillFile is only supported in server mode.' }
     if ($SkipPrefill -and $Mode -ne 'server') { throw 'SkipPrefill is only supported in server mode.' }
+    if ($SinglePrefill -and $Mode -ne 'server') { throw 'SinglePrefill is only supported in server mode.' }
     if ($SkipPrefill -and $PrefillFile) { throw 'Use either PrefillFile or SkipPrefill.' }
     if ($Mode -eq 'devices') {
         & $exe --list-devices
@@ -137,8 +178,18 @@ try {
         if (-not $PSBoundParameters.ContainsKey('ContextSize')) { $ContextSize = 131072 }
         if (-not $PSBoundParameters.ContainsKey('MaxTokens')) { $MaxTokens = 131072 }
         if (-not $PSBoundParameters.ContainsKey('KVCache')) { $KVCache = 'q8_0' }
-        if (-not $SkipPrefill -and -not $PSBoundParameters.ContainsKey('PrefillFile')) {
+        $bundledPrefill = -not $SkipPrefill -and -not $PSBoundParameters.ContainsKey('PrefillFile')
+        $explicitRamCache = $PSBoundParameters.ContainsKey('CacheRamMiB') -and $CacheRamMiB -ne 0
+        $explicitCheckpoints = $PSBoundParameters.ContainsKey('ContextCheckpoints') -and $ContextCheckpoints -ne 0
+        $stagedPrefill = $bundledPrefill -and -not $SinglePrefill -and $KVCache -eq 'q8_0' -and
+            (-not $DraftModel -or $DraftMax -eq 3) -and -not $explicitRamCache -and -not $explicitCheckpoints -and -not $ExtraArgs.Count
+        if ($bundledPrefill) {
             $PrefillFile = Join-Path $PSScriptRoot 'astudio_template\template.txt'
+        }
+        if ($stagedPrefill) {
+            $env:LLAMA_SERVER_RESIDENT_PREFIXES = '6'
+            $CacheRamMiB = 0
+            $ContextCheckpoints = 0
         }
     }
     if (-not $Model) { $Model = Read-Host 'GGUF model path' }
@@ -147,9 +198,13 @@ try {
     if ($Mode -eq 'server' -and ($Prompt -or $PromptFile)) { throw 'Send server prompts through the HTTP API.' }
     if ($PrefillFile) {
         $PrefillFile = Resolve-ModelFile $PrefillFile
-        $prefix = [IO.File]::ReadAllText($PrefillFile, [Text.UTF8Encoding]::new($false, $true))
-        if ($PrefillNewlines -eq 'lf') { $prefix = $prefix.Replace("`r`n", "`n") }
-        if ([string]::IsNullOrWhiteSpace($prefix)) { throw 'PrefillFile must contain a UTF-8 prompt prefix.' }
+        if ($stagedPrefill) {
+            $sections = @(Get-BundledPrefillSections $PrefillFile)
+        } else {
+            $prefix = [IO.File]::ReadAllText($PrefillFile, [Text.UTF8Encoding]::new($false, $true))
+            if ([string]::IsNullOrWhiteSpace($prefix)) { throw 'PrefillFile must contain a UTF-8 prompt prefix.' }
+            $sections = @(@{Name = $PrefillFile; Text = $prefix})
+        }
     }
     $nativeArgs = @('-m', $modelPath, '--device', $Device, '-ngl', '99',
         '-fa', 'on', '-c', "$ContextSize", '-t', "$Threads", '-tb', "$Threads",
@@ -173,6 +228,7 @@ try {
             '--seed', "$Seed", '--kv-v-token32', '--cache-prompt',
             '--cache-ram', "$CacheRamMiB", '--ctx-checkpoints', "$ContextCheckpoints",
             '--checkpoint-min-step', "$CheckpointMinStep", '--no-webui')
+        if ($stagedPrefill) { $nativeArgs += '--kv-unified' }
         if ($ModelAlias) { $nativeArgs += @('--alias', $ModelAlias) }
         if ($NoCacheIdleSlots -or $CacheRamMiB -eq 0) {
             $nativeArgs += '--no-cache-idle-slots'
@@ -188,15 +244,16 @@ try {
     }
     $nativeArgs += $ExtraArgs
     if ($PrefillFile) {
-        # Prefill targets slot 0 on this server; preserve the configured RAM cache.
+        # Prefill targets slot 0 on this server.
         $nativeArgs += @('--host', $ListenHost, '--port', "$Port", '-np', '1',
             '--cache-prompt')
-        $result = Invoke-PrefilledServer -NativeArguments $nativeArgs -Prefix $prefix
+        $result = Invoke-PrefilledServer -NativeArguments $nativeArgs -Sections $sections
     } else {
         & $exe @nativeArgs
         $result = $LASTEXITCODE
     }
 } finally {
     $env:GGML_VK_DISABLE_COOPMAT = $previousCoopmat
+    $env:LLAMA_SERVER_RESIDENT_PREFIXES = $previousResidentPrefixes
 }
 exit $result

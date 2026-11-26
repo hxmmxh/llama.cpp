@@ -52,13 +52,13 @@ python3 tools/distribution/vulkan/package.py \
 - 中文运行说明、`version.json`、`SHA256SUMS.txt`。
 - 本项目 Logo 和 `PACKAGING.zh-CN.md`，名称统一为 **llama.cpp Spark Intel GPU Edition**。
 
-HTTP server 默认在启动时预热模板，采用 128K 上下文及输出预算、8 GiB RAM KV 缓存。监听地址支持 `-Host` / `-ListenHost`、`-Port`；支持 `-PrefillFile`、`-SkipPrefill` 和 `-PrefillNewlines preserve`。LF 规范化、token ID 预热和零预算响应兼容逻辑保留在 `run.ps1` 中。终端用户只需解压包、准备模型并安装可用显卡驱动。
+HTTP server 默认采用 128K 上下文及输出预算，预热标题和三个主请求边界，并保存在进程内的 KV 驻留池。`run.ps1` 负责模板校验、token 前缀校验和零预算预热。可用 `-SinglePrefill` 选择单段预热，或用 `-PrefillFile` 指定另一份渲染后的前缀。
 
-更换默认模板时，同步 `template-info.json` 的 `bytes` 和 `sha256`。模板中的日期、路径和工具说明是固定内容，不会随打包自动更新。Git 属性和编辑器配置会保护模板的原始字节和换行。
+更换默认模板时，同步更新 `template-info.json` 中主模板和标题模板的字节数、SHA-256 及主模板三档累计字节边界。Git 属性和编辑器配置保留模板的原始字节和换行。
 
 `astudio_template/` 已受本仓库 Git 管理，是默认模板的唯一源文件。客户端更新后，先通过服务的 `/apply-template` 渲染真实请求，去掉最后一条具体提问及回复生成标记，再用 `/tokenize` 验证模板是该请求的逐 token 前缀；相同 token 数不代表内容匹配。
 
-当前模板截到 `</INSTRUCTIONS><environment_context>` 开头标记，排除其后的路径、日期、时区、权限等环境字段。客户端仍发送完整请求，动态环境作为尾部 prefill。截断位置须通过 token 前缀检查，避免边界处的 BPE 合并导致最后一个 token 不匹配。
+主模板的前两档分别在第二段 System 和第一段 User 之前结束，第三档结束于 `</INSTRUCTIONS><environment_context>`。标题结束于 `<environment_context>`。逐档验证字节边界和实际 token 序列，再核对完整请求能选择可用的最长前缀。
 
 ## 本地检查
 

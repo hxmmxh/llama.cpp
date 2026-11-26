@@ -26,6 +26,25 @@ class DefaultPrefillPackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'identity changed'):
                 package.load_default_template(assets)
 
+    def test_changed_title_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            assets = Path(temporary) / 'astudio_template'
+            shutil.copytree(package.TOOLS / 'astudio_template', assets)
+            (assets / 'title.txt').write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'title template identity changed'):
+                package.load_default_template(assets)
+
+    def test_stage_must_end_at_a_role_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            assets = Path(temporary) / 'astudio_template'
+            shutil.copytree(package.TOOLS / 'astudio_template', assets)
+            metadata = assets / 'template-info.json'
+            info = json.loads(metadata.read_text())
+            info['main_stages'][1]['bytes'] += 1
+            metadata.write_text(json.dumps(info))
+            with self.assertRaisesRegex(ValueError, 'stage boundary mismatch'):
+                package.load_default_template(assets)
+
     def make_archive(self, directory, omit_prefix=False, corrupt_prefix=False, omit_logo=False):
         version = 'package-check'
         paths = [*package.LAUNCHERS, *package.BRANDING_FILES,
