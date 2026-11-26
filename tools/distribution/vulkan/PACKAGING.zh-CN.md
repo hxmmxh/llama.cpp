@@ -54,7 +54,7 @@ python3 tools/distribution/vulkan/package.py \
 
 HTTP server 默认在启动时预热模板，采用 128K 上下文及输出预算、8 GiB RAM KV 缓存。监听地址支持 `-Host` / `-ListenHost`、`-Port`；支持 `-PrefillFile`、`-SkipPrefill` 和 `-PrefillNewlines preserve`。LF 规范化、token ID 预热和零预算响应兼容逻辑保留在 `run.ps1` 中。终端用户只需解压包、准备模型并安装可用显卡驱动。
 
-更换默认模板时，同步 `template-info.json` 的 `bytes` 和 `sha256`。模板中的日期、路径和工具说明是固定内容，不会随打包自动更新。Git 属性和编辑器配置会保护模板的原始字节及 CRLF。
+更换默认模板时，同步 `template-info.json` 的 `bytes` 和 `sha256`。模板中的日期、路径和工具说明是固定内容，不会随打包自动更新。Git 属性和编辑器配置会保护模板的原始字节和换行。
 
 `astudio_template/` 已受本仓库 Git 管理，是默认模板的唯一源文件。客户端更新后，先通过服务的 `/apply-template` 渲染真实请求，去掉最后一条具体提问及回复生成标记，再用 `/tokenize` 验证模板是该请求的逐 token 前缀；相同 token 数不代表内容匹配。
 
