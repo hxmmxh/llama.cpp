@@ -1119,6 +1119,7 @@ private:
     // set to llama_model_n_swa(model)
     // if swa_full is enabled, this is set to 0 to simulate a non-SWA model
     int32_t n_swa;
+    int32_t n_swa_dft = 0;
 
     // slots / clients
     std::vector<server_slot> slots;
@@ -1143,6 +1144,13 @@ private:
 
     // Necessary similarity of prompt for slot selection
     float slot_prompt_similarity = 0.0f;
+
+    struct resident_prefix {
+        server_tokens tokens;
+        int64_t last_use = 0;
+        bool prewarmed = false;
+    };
+    std::vector<resident_prefix> resident_prefixes;
 
     std::string model_name; // name of the loaded model, to be used by API
     std::set<std::string> model_aliases; // additional names for the model
@@ -1247,6 +1255,33 @@ private:
                                         params_base.speculative.types.end(),
                                         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
         const bool has_spec = has_draft || spec_mtp;
+        const auto & speculative = params_base.speculative;
+        const bool resident_d3 = has_draft && speculative.draft.n_max == 3 && !speculative.adaptive && !speculative.has_synth() &&
+            std::find(speculative.types.begin(), speculative.types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) != speculative.types.end() &&
+            std::all_of(speculative.types.begin(), speculative.types.end(), [](common_speculative_type type) {
+                return type == COMMON_SPECULATIVE_TYPE_NONE || type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
+            });
+
+        resident_prefixes.clear();
+        if (const char * limit = std::getenv("LLAMA_SERVER_RESIDENT_PREFIXES")) {
+            char * end = nullptr;
+            const long count = std::strtol(limit, &end, 10);
+            if (end == limit || *end || count < 1 || size_t(count) > (llama_max_parallel_sequences() - 1) / 2) {
+                SRV_ERR("%s\n", "invalid LLAMA_SERVER_RESIDENT_PREFIXES count");
+                return false;
+            }
+            if (params_base.n_parallel != 1 || !params_base.kv_unified || !params_base.kv_v_token32 ||
+                    params_base.cache_idle_slots || params_base.cache_ram_mib != 0 ||
+                    params_base.n_ctx_checkpoints != 0 || has_mmproj || !params_base.lora_adapters.empty()) {
+                SRV_ERR("%s\n", "resident prefixes require one slot, unified token32 KV, and no RAM cache, checkpoints, multimodal or LoRA");
+                return false;
+            }
+            if (!resident_d3 && (has_spec || common_speculative_n_max(&speculative) > 0)) {
+                SRV_ERR("%s\n", "resident prefixes support ordinary decoding or fixed-depth DSpark D3");
+                return false;
+            }
+            resident_prefixes.resize(count);
+        }
 
         if (callback_state) {
             std::vector<std::string> stages = {"text_model"};
@@ -1331,7 +1366,13 @@ private:
             params_base.load_progress_callback_user_data = &load_progress_text;
         }
 
+        // Reserve up to two SWA windows per prefix so a changed suffix can still reuse KV.
+        const int32_t n_resident_seqs = 2 * int32_t(resident_prefixes.size());
+        params_base.n_parallel += n_resident_seqs;
+        params_base.n_outputs_max = std::max(params_base.n_outputs_max, params_base.n_parallel);
         llama_init = common_init_from_params(params_base);
+        params_base.n_parallel -= n_resident_seqs;
+        params_base.n_outputs_max = output_limits.total;
 
         model_tgt = llama_init->model();
         ctx_tgt   = llama_init->context();
@@ -1359,6 +1400,7 @@ private:
 
         add_bos_token = llama_vocab_get_add_bos(vocab);
 
+        n_swa_dft = 0;
         if (has_spec) {
             // spec_mtp doesn't use load a model internally, so we report 0.0 and 1.0 manually
             load_progress_callback(0.0f, &load_progress_spec);
@@ -1366,6 +1408,8 @@ private:
 
             {
                 common_params params_dft = common_base_params_to_speculative(params_base);
+                params_dft.n_parallel += n_resident_seqs;
+                params_dft.n_outputs_max = std::max(params_dft.n_outputs_max, params_dft.n_parallel);
 
                 // progress callback
                 params_dft.load_progress_callback           = load_progress_callback;
@@ -1387,6 +1431,9 @@ private:
 
                 params_base.speculative.draft.ctx_tgt = ctx_tgt;
                 params_base.speculative.draft.ctx_dft = ctx_dft;
+                if (model_dft && !params_dft.swa_full) {
+                    n_swa_dft = llama_model_n_swa(model_dft);
+                }
             }
 
             load_progress_callback(1.0f, &load_progress_spec);
@@ -1443,7 +1490,7 @@ private:
 
         mtmd_cap = mtmd_helper_get_capabilities(model_tgt, mctx);
 
-        if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
+        if (!resident_prefixes.empty() || !llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
             if (params_base.ctx_shift) {
                 params_base.ctx_shift = false;
                 SRV_WRN("%s\n", "ctx_shift is not supported by this context, it will be disabled");
@@ -1522,6 +1569,10 @@ private:
             }
         }
 
+        if (!resident_prefixes.empty()) {
+            SRV_INF("resident prefix cache: %zu entries\n", resident_prefixes.size());
+        }
+
         // setup slots
         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
                 params_base.n_parallel, n_ctx_slot(), params_base.kv_unified ? "true" : "false");
@@ -1545,6 +1596,15 @@ private:
 
         if (ctx_dft) {
             ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft);
+        }
+
+        if (!resident_prefixes.empty() && resident_d3) {
+            if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART || ctx_dft_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART ||
+                    !common_speculative_set_resident_draft(spec.get(), [this] { return evict_resident_prefix(); })) {
+                SRV_ERR("%s\n", "resident D3 requires an anchor-first DSpark draft and partial rollback on both contexts");
+                return false;
+            }
+            SRV_INF("%s\n", "resident prefix cache: target and DSpark D3 draft KV enabled");
         }
 
         if (spec) {
@@ -1955,6 +2015,117 @@ private:
         }
 
         return ret;
+    }
+
+    void clear_resident_prefix(size_t index) {
+        const common_memory mem{ctx_tgt, ctx_dft};
+        mem.seq_rm(index + 1, -1, -1);
+        mem.seq_rm(index + 1 + resident_prefixes.size(), -1, -1);
+        resident_prefixes[index] = {};
+    }
+
+    size_t oldest_resident_prefix(bool include_empty) const {
+        size_t oldest = resident_prefixes.size();
+        for (size_t i = 0; i < resident_prefixes.size(); ++i) {
+            const auto & prefix = resident_prefixes[i];
+            if (prefix.last_use == 0) {
+                if (include_empty) {
+                    return i;
+                }
+                continue;
+            }
+
+            if (oldest == resident_prefixes.size()) {
+                oldest = i;
+                continue;
+            }
+            const auto & candidate = resident_prefixes[oldest];
+            if (std::make_pair(prefix.prewarmed, prefix.last_use) < std::make_pair(candidate.prewarmed, candidate.last_use)) {
+                oldest = i;
+            }
+        }
+        return oldest;
+    }
+
+    void remember_resident_prefix(const server_slot & slot) {
+        if (resident_prefixes.empty() || slot.task->type != SERVER_TASK_TYPE_COMPLETION ||
+                !slot.task->params.cache_prompt || slot.prompt.tokens.empty()) {
+            return;
+        }
+
+        const auto & tokens = slot.prompt.tokens;
+        const bool prewarmed = slot.task->params.res_type == TASK_RESPONSE_TYPE_NONE && slot.task->params.n_predict == 0;
+        const int64_t now = ggml_time_us();
+        for (auto & prefix : resident_prefixes) {
+            if (prefix.tokens.size() == tokens.size() && prefix.tokens.get_common_prefix(tokens) == tokens.size()) {
+                prefix.last_use = now;
+                prefix.prewarmed |= prewarmed;
+                return;
+            }
+        }
+
+        const size_t index = oldest_resident_prefix(true);
+        clear_resident_prefix(index);
+        const llama_pos end = tokens.pos_next();
+        slot.mem.seq_cp(slot.id, index + 1, 0, end);
+        // SWA reclaims expired cells with a single owner. The second reference keeps them resident.
+        slot.mem.seq_cp(index + 1, index + 1 + resident_prefixes.size(), 0, end);
+        resident_prefixes[index] = { tokens.clone(), now, prewarmed };
+        SLT_INF(slot, "resident prefix stored: entry %zu, %zu tokens (%s)\n", index, tokens.size(), prewarmed ? "prewarm" : "request");
+    }
+
+    bool resident_prefix_covers(llama_seq_id seq_id, llama_pos pos_eval) const {
+        const auto covers = [&](llama_context * ctx, int32_t swa) {
+            auto * mem = llama_get_memory(ctx);
+            const llama_pos pos_min = llama_memory_seq_pos_min(mem, seq_id);
+            const llama_pos pos_max = llama_memory_seq_pos_max(mem, seq_id);
+            const llama_pos pos_min_thold = std::max(0, swa > 0 ? pos_eval - swa + 2 : pos_eval);
+            return pos_max >= pos_eval - 1 && (pos_min == 0 || (pos_min > 0 && pos_min < pos_min_thold));
+        };
+        return covers(ctx_tgt, n_swa) && (!ctx_dft || covers(ctx_dft, n_swa_dft));
+    }
+
+    size_t use_resident_prefix(server_slot & slot, const server_tokens & input) {
+        const auto reusable = [&](const server_tokens & cached, llama_seq_id seq_id) -> size_t {
+            const size_t common = cached.get_common_prefix(input);
+            // A fully cached request still evaluates its last token for logits.
+            return common > 0 && resident_prefix_covers(seq_id, cached.pos_next(common) - (common == input.size())) ? common : 0;
+        };
+
+        size_t best = resident_prefixes.size();
+        size_t best_size = reusable(slot.prompt.tokens, slot.id);
+
+        for (size_t i = 0; i < resident_prefixes.size(); ++i) {
+            const size_t shared = reusable(resident_prefixes[i].tokens, i + 1);
+            if (shared > best_size) {
+                best = i;
+                best_size = shared;
+            }
+        }
+
+        if (best == resident_prefixes.size()) {
+            return best_size;
+        }
+
+        auto & prefix = resident_prefixes[best];
+        slot.prompt_clear();
+        slot.mem.seq_cp(best + 1, slot.id, 0, prefix.tokens.pos_next(best_size));
+        slot.prompt.tokens = prefix.tokens.clone();
+        slot.prompt.tokens.keep_first(best_size);
+        prefix.last_use = ggml_time_us();
+        SLT_INF(slot, "resident prefix hit: entry %zu, %zu tokens\n", best, best_size);
+        return best_size;
+    }
+
+    bool evict_resident_prefix() {
+        const size_t oldest = oldest_resident_prefix(false);
+        if (oldest == resident_prefixes.size()) {
+            return false;
+        }
+
+        SRV_INF("resident prefix evicted under KV pressure: entry %zu\n", oldest);
+        clear_resident_prefix(oldest);
+        return true;
     }
 
     // return true if at least one slot has been cleared
@@ -4115,7 +4286,8 @@ private:
 
                             if (slot.task->params.cache_prompt && !slot.task->is_stateless()) {
                                 // reuse any previously computed tokens that are common with the new prompt
-                                n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
+                                n_past = resident_prefixes.empty() ? slot.prompt.tokens.get_common_prefix(input_tokens) :
+                                        use_resident_prefix(slot, input_tokens);
 
                                 // the children start from the shared prefix, do not go past it
                                 if (slot.task->n_tokens_shared > 0) {
@@ -4136,7 +4308,7 @@ private:
                                 const auto n_cache_reuse = slot.task->params.n_cache_reuse;
 
                                 const bool can_cache_reuse =
-                                    llama_memory_can_shift(llama_get_memory(ctx_tgt)) &&
+                                    resident_prefixes.empty() && llama_memory_can_shift(llama_get_memory(ctx_tgt)) &&
                                     !slot.prompt.tokens.has_mtmd;
 
                                 if (!can_cache_reuse && n_cache_reuse > 0) {
@@ -4200,8 +4372,6 @@ private:
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
 
                             // number of cached tokens shared with the new prompt, before any checkpoint is restored
-                            const int n_prefix = n_past;
-
                             // ref: https://github.com/ggml-org/llama.cpp/pull/24110
                             const bool has_new_tokens = (n_past < slot.task->n_tokens());
 
@@ -4211,6 +4381,12 @@ private:
 
                             // a state or a checkpoint is useful when its pos_min is below this threshold
                             const auto pos_min_thold = std::max(0, n_swa > 0 ? pos_eval - n_swa + 2 : pos_eval);
+
+                            if (!resident_prefixes.empty() && n_past > 0 && !resident_prefix_covers(slot.id, pos_eval)) {
+                                n_past = 0;
+                                pos_next = 0;
+                            }
+                            const int n_prefix = n_past;
 
                             if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
@@ -4262,7 +4438,7 @@ private:
                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
                                 }
 
-                                if (pos_min >= pos_min_thold) {
+                                if (pos_min >= pos_min_thold && (resident_prefixes.empty() || pos_min > 0)) {
                                     // search for a context checkpoint
                                     const auto it = std::find_if(
                                         slot.prompt.checkpoints.rbegin(),
@@ -4711,6 +4887,9 @@ private:
         });
 
         if (ret != 0) {
+            if (ret == 1 && evict_resident_prefix()) {
+                return false; // retry this batch with the released cells
+            }
             {
                 std::string err;
 
@@ -4868,6 +5047,7 @@ private:
                 }
 
                 GGML_ASSERT(slot.task->need_sampling());
+                remember_resident_prefix(slot);
 
                 // prompt evaluated for next-token prediction
                 slot.state = SLOT_STATE_GENERATING;
@@ -4889,7 +5069,11 @@ private:
             llama_token id;
             {
                 scoped_timer timer(t_sampl, n_sampl);
-                id = common_sampler_sample(slot.smpl.get(), slot.ctx_tgt, tok_idx);
+                if (slot.task->params.sampling.n_probs == 0 && !slot.can_speculate()) {
+                    id = common_sampler_sample_token_only(slot.smpl.get(), slot.ctx_tgt, tok_idx);
+                } else {
+                    id = common_sampler_sample(slot.smpl.get(), slot.ctx_tgt, tok_idx);
+                }
             }
 
             slot.i_batch = -1;

@@ -3,6 +3,8 @@
 #include "llama.h"
 #include "common.h"
 
+#include <functional>
+
 struct common_speculative;
 struct common_sampler_draft_probs;
 
@@ -29,6 +31,9 @@ int32_t common_speculative_n_max(const common_params_speculative * spec);
 
 // return the max number of draft tokens from the initialized implementations
 int32_t common_speculative_n_max(const common_speculative * spec);
+
+// Enable eviction and retry when a resident prefix fills the draft KV cache.
+bool common_speculative_set_resident_draft(common_speculative * spec, std::function<bool()> evict_prefix);
 
 // validate and resolve the unconditional synthetic acceptance rates
 std::vector<double> common_speculative_synth_rates_resolve(const common_params_speculative * spec, int32_t n_max);

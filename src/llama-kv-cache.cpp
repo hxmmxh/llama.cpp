@@ -83,9 +83,12 @@ llama_kv_cache::llama_kv_cache(
                const char * name_tag,
                   uint32_t   kv_tail_tokens,
                   uint32_t   n_ubatch,
-                      bool   kv_v_token32) :
+                      bool   kv_v_token32,
+                  uint32_t   resident_swa_entries) :
     model(model), hparams(hparams), vplane_enabled(kv_v_token32), v_trans(v_trans),
-    n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_swa(n_swa), swa_type(swa_type),
+    n_seq_max(n_seq_max), resident_swa_entries(resident_swa_entries),
+    n_stream(resident_swa_entries > 0 ? resident_swa_entries + 1 : unified ? 1 : n_seq_max),
+    n_swa(n_swa), swa_type(swa_type),
     ctxs_bufs(no_alloc),
     other(static_cast<llama_kv_cache *>(mem_other)),
     v_cells_impl(other ? other->v_cells_impl : std::make_shared<llama_kv_cells_vec>()),
@@ -163,7 +166,7 @@ llama_kv_cache::llama_kv_cache(
         return it->second.get();
     };
 
-    GGML_ASSERT(n_stream == 1 || n_stream == n_seq_max);
+    GGML_ASSERT(n_stream == 1 || n_stream == n_seq_max || has_resident_swa_streams());
 
     v_heads.resize(n_stream);
     for (uint32_t s = 0; s < n_stream; ++s) {
@@ -178,7 +181,13 @@ llama_kv_cache::llama_kv_cache(
     // by default, all sequence ids are mapped to the 0th stream
     seq_to_stream.resize(LLAMA_MAX_SEQ, 0);
 
-    if (n_stream > 1) {
+    if (has_resident_swa_streams()) {
+        GGML_ASSERT(unified && n_seq_max == 2 * resident_swa_entries + 1 && !other);
+        for (uint32_t s = 1; s <= resident_swa_entries; ++s) {
+            seq_to_stream[s] = s;
+            seq_to_stream[s + resident_swa_entries] = s;
+        }
+    } else if (n_stream > 1) {
         seq_to_stream.resize(n_stream, 0);
         for (uint32_t s = 0; s < n_stream; ++s) {
             seq_to_stream[s] = s;
@@ -427,6 +436,7 @@ llama_kv_cache::llama_kv_cache(
 }
 
 void llama_kv_cache::clear(bool data) {
+    sc_info = {};
     vplane_dirty.clear();
     vplane_recent.clear();
     vplane_next.clear();
@@ -554,6 +564,10 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
 
         if (p1 < 0) {
             p1 = std::numeric_limits<llama_pos>::max();
+        } else if (n_swa > 0 && n_seq_max > 1 && seq_id_src == 0 && seq_id_dst != 0 &&
+                std::getenv("LLAMA_SERVER_RESIDENT_PREFIXES")) {
+            // Keep an extra SWA window for requests that diverge near the end of this prefix.
+            p0 = std::max(p0, p1 - 2 * llama_pos(n_swa));
         }
 
         for (uint32_t i = 0; i < cells.size(); ++i) {
@@ -571,17 +585,18 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
 
     // cross-stream sequence copies require to copy the actual buffer data
 
-    bool is_full = true;
-
-    if (p0 > 0 && p0 + 1 < (int) get_size()) {
-        is_full = false;
+    if (has_resident_swa_streams()) {
+        p0 = std::max(p0, 0);
+        if (p1 < 0) {
+            p1 = std::numeric_limits<llama_pos>::max();
+        } else if (seq_id_src == 0) {
+            // Keep an extra SWA window for requests that diverge near the end of this prefix.
+            p0 = std::max(p0, p1 - 2 * llama_pos(n_swa));
+        }
+    } else {
+        const bool is_full = (p0 <= 0 || p0 + 1 >= (int) get_size()) && (p1 <= 0 || p1 + 1 >= (int) get_size());
+        GGML_ASSERT(is_full && "seq_cp() is only supported for full KV buffers");
     }
-
-    if (p1 > 0 && p1 + 1 < (int) get_size()) {
-        is_full = false;
-    }
-
-    GGML_ASSERT(is_full && "seq_cp() is only supported for full KV buffers");
 
     // enqueue the copy operation - the buffer copy will be performed during the next update
     sc_info.ssrc.push_back(s0);
@@ -589,7 +604,7 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
 
     v_cells[s1].reset();
     for (uint32_t i = 0; i < v_cells[s0].size(); ++i) {
-        if (v_cells[s0].seq_has(i, seq_id_src)) {
+        if (v_cells[s0].seq_has(i, seq_id_src) && (!has_resident_swa_streams() || v_cells[s0].pos_in(i, p0, p1))) {
             llama_pos pos   = v_cells[s0].pos_get(i);
             llama_pos shift = v_cells[s0].get_shift(i);
 
@@ -890,6 +905,25 @@ llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_
     return res;
 }
 
+void llama_kv_cache::copy_streams(const stream_copy_info & copies) const {
+    assert(n_stream > 1 && "stream copy should never happen with a single stream");
+
+    for (size_t i = 0; i < copies.ssrc.size(); ++i) {
+        const auto src = copies.ssrc[i];
+        const auto dst = copies.sdst[i];
+        assert(src < n_stream && dst < n_stream && src != dst);
+
+        LLAMA_LOG_DEBUG("%s: copying KV buffer: stream %d to stream %d\n", __func__, src, dst);
+
+        for (const auto & layer : layers) {
+            ggml_backend_tensor_copy(layer.k_stream[src], layer.k_stream[dst]);
+            if (layer.v_stream[src]) {
+                ggml_backend_tensor_copy(layer.v_stream[src], layer.v_stream[dst]);
+            }
+        }
+    }
+}
+
 bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_copy_info & sc_info) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
@@ -901,33 +935,8 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
     auto * sched = lctx->get_sched();
 
     if (!sc_info.empty()) {
-        assert(n_stream > 1 && "stream copy should never happen with a single stream");
-
         llama_synchronize(lctx);
-
-        const size_t n_copy = sc_info.ssrc.size();
-
-        for (size_t i = 0; i < n_copy; ++i) {
-            const auto ssrc = sc_info.ssrc[i];
-            const auto sdst = sc_info.sdst[i];
-
-            assert(ssrc < n_stream);
-            assert(sdst < n_stream);
-
-            LLAMA_LOG_DEBUG("%s: copying KV buffer: stream %d to stream %d\n", __func__, ssrc, sdst);
-
-            assert(ssrc != sdst);
-
-            for (uint32_t il = 0; il < layers.size(); ++il) {
-                const auto & layer = layers[il];
-
-                ggml_backend_tensor_copy(layer.k_stream[ssrc], layer.k_stream[sdst]);
-
-                if (layer.v_stream[ssrc]) {
-                    ggml_backend_tensor_copy(layer.v_stream[ssrc], layer.v_stream[sdst]);
-                }
-            }
-        }
+        copy_streams(sc_info);
     }
 
     if (do_shift) {
@@ -975,6 +984,9 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
 }
 
 llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch, bool cont) const {
+    if (has_resident_swa_streams() && (ubatch.n_seqs_unq != 1 || ubatch.seq_id_unq[0] != 0)) {
+        return {};
+    }
 
     if (debug > 0) {
         for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
@@ -1095,6 +1107,8 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
         // for continuous slots, we test that all tokens in the ubatch fit, starting from the current head
         // for non-continuous slots, we test the tokens one by one
         const uint32_t n_test = cont ? n_tokens : 1;
+        uint32_t checked_tile = UINT32_MAX;
+        bool tile_reserved = false;
 
         while (true) {
             if (head_cur + n_test > cells.size()) {
@@ -1137,6 +1151,22 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
                             can_use = true;
                         }
                     }
+                }
+
+                if (can_use && vplane_enabled && n_seq_max > 1) {
+                    const uint32_t tile = idx / 32;
+                    if (tile != checked_tile) {
+                        checked_tile = tile;
+                        tile_reserved = false;
+                        for (uint32_t row = 32 * tile; row < 32 * (tile + 1); ++row) {
+                            if (!cells.is_empty(row) && cells.seq_count(row) > int(cells.seq_has(row, seq_id))) {
+                                // Repacking a shared tile can change the quantization of its resident prefix.
+                                tile_reserved = true;
+                                break;
+                            }
+                        }
+                    }
+                    can_use = !tile_reserved;
                 }
 
                 if (can_use) {
@@ -2371,9 +2401,18 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
         return;
     }
 
-    io.write(&n_stream, sizeof(n_stream));
+    if (has_resident_swa_streams() && !io.is_counting() && !sc_info.empty()) {
+        copy_streams(sc_info);
+        sc_info = {};
+    }
 
-    for (uint32_t s = 0; s < n_stream; ++s) {
+    // A single sequence still has the unified-cache disk layout with one stream.
+    const bool single_snapshot = has_resident_swa_streams() && seq_id >= 0;
+    const uint32_t saved_streams = single_snapshot ? 1 : n_stream;
+    io.write(&saved_streams, sizeof(saved_streams));
+
+    for (uint32_t i_stream = 0; i_stream < saved_streams; ++i_stream) {
+        const uint32_t s = single_snapshot ? seq_to_stream[seq_id] : i_stream;
         cell_ranges_t cr { s, {} };
 
         uint32_t cell_count = 0;
@@ -2471,7 +2510,8 @@ const slot_info_vec_t *   sinfos_in) {
 
     uint32_t n_stream_cur;
     io.read(&n_stream_cur, sizeof(n_stream_cur));
-    if (n_stream_cur != n_stream) {
+    const uint32_t expected_streams = has_resident_swa_streams() && seq_id >= 0 ? 1 : n_stream;
+    if (n_stream_cur != expected_streams) {
         throw std::runtime_error("n_stream mismatch");
     }
 
@@ -2479,9 +2519,13 @@ const slot_info_vec_t *   sinfos_in) {
     // clear() resets all streams at once, so doing it per stream below would keep only the last one
     if (seq_id == -1) {
         clear(true);
+    } else if (has_resident_swa_streams() && !sc_info.empty()) {
+        // Preserve snapshots whose source rows may be overwritten by the restore.
+        copy_streams(sc_info);
+        sc_info = {};
     }
 
-    for (uint32_t s = 0; s < n_stream; ++s) {
+    for (uint32_t s = 0; s < n_stream_cur; ++s) {
         uint32_t cell_count;
         io.read(&cell_count, sizeof(cell_count));
 
@@ -2612,16 +2656,22 @@ void llama_kv_cache::state_write_vplane(llama_io_write_i & io, const cell_ranges
         io.write(&dirty, sizeof(dirty));
     }
 
+    if (io.is_counting()) {
+        io.write(nullptr, layers.size() * (2 * tiles.size() * tile_bytes + raw.size() * vplane_raw_tile_bytes));
+        return;
+    }
+
+    // Read both heads in one transfer, bounded by the first and last live tiles.
+    const size_t first_tile = tiles.front();
+    const size_t head_bytes = (tiles.back() - first_tile + 1) * tile_bytes;
+    std::vector<uint8_t> packed(2 * head_bytes);
     for (const auto & layer : layers) {
-        if (io.is_counting()) {
-            io.write(nullptr, 2 * tiles.size() * tile_bytes + raw.size() * vplane_raw_tile_bytes);
-            continue;
-        }
-        std::vector<uint8_t> packed(ggml_nbytes(layer.vplane));
-        ggml_backend_tensor_get(layer.vplane, packed.data(), 0, packed.size());
+        ggml_backend_tensor_get_2d(layer.vplane, packed.data(), first_tile * tile_bytes, head_bytes,
+                                  2, layer.vplane->nb[2], head_bytes);
         for (uint32_t tile : tiles) {
+            const size_t offset = (tile - first_tile) * tile_bytes;
             for (uint32_t h = 0; h < 2; ++h) {
-                io.write(packed.data() + h * layer.vplane->nb[2] + tile * tile_bytes, tile_bytes);
+                io.write(packed.data() + h * head_bytes + offset, tile_bytes);
             }
         }
         if (!raw.empty()) {
@@ -3418,7 +3468,7 @@ llama_kv_cache_context::llama_kv_cache_context(
         llama_kv_cache * kv) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv) {
     n_kv = kv->get_size();
 
-    const uint32_t n_stream = kv->get_n_stream();
+    const uint32_t n_stream = kv->has_resident_swa_streams() ? 1 : kv->get_n_stream();
 
     // create a dummy slot info - the actual data is irrelevant. we just need to build the graph
     sinfos.resize(1);

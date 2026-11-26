@@ -210,3 +210,6 @@ LLAMA_API uint32_t llama_model_get_tok_embd_rows(const struct llama_model * mode
 
 // realtime models: number of tokens the output lags behind the audio input, used by mtmd; 0 if not applicable
 LLAMA_API uint32_t llama_model_n_tokens_delay(const struct llama_model * model);
+
+// The caller consumes only the selected token, so tied candidate order is unobservable.
+LLAMA_API void llama_sampler_apply_token_only(struct llama_sampler * smpl, llama_token_data_array * cur_p);

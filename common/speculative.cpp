@@ -991,9 +991,19 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
 // DFlash: block-diffusion drafting with a draft-side KV cache injection
 struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     common_params_speculative_draft params;
+    std::function<bool()> evict_resident_prefix;
 
     common_batch batch;        // noise tokens
     common_batch batch_inject; // target features for KV cache injection
+
+    int decode_draft(common_batch & input) {
+        // A return value of 1 means KV allocation failed before the batch was applied.
+        int ret = llama_process(params.ctx_dft, LLAMA_PROCESS_TYPE_DECODE, input.get());
+        while (ret == 1 && evict_resident_prefix && evict_resident_prefix()) {
+            ret = llama_process(params.ctx_dft, LLAMA_PROCESS_TYPE_DECODE, input.get());
+        }
+        return ret;
+    }
 
     std::vector<float> features_buf; // [n_chunk, n_embd_enc] gathered target features
 
@@ -1173,6 +1183,9 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             const char * device_env = std::getenv("LLAMA_DSPARK_DEVICE");
             dspark_device = device_env && std::strcmp(device_env, "1") == 0;
             if (dspark_device) {
+                if (n_seq != 1) {
+                    throw std::runtime_error("device DSpark requires one decoding sequence");
+                }
                 llama_dspark_device_init(ctx_tgt, ctx_dft);
                 const char * dense_q_env = std::getenv("LLAMA_DSPARK_DENSE_Q");
                 dspark_dense_q = dense_q_env && std::strcmp(dense_q_env, "1") == 0;
@@ -1442,7 +1455,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                     const llama_pos pos_arr[4] = { p, p, p, 0 };
                     batch_inject.add_embd({ features_buf.data() + (size_t) i * n_embd_enc, 1, (size_t) n_embd_enc }, pos_arr, seq_id, false);
                 }
-                const int32_t rc = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch_inject.get());
+                const int32_t rc = decode_draft(batch_inject);
                 if (rc != 0) {
                     LOG_ERR("%s: llama_process(ctx_dft) failed rc=%d (n_tokens=%d, offset=%d)\n",
                             __func__, rc, (int) n_chunk, (int) offset);
@@ -1601,7 +1614,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
         }
 
         // decode all sequence's noise block in a single batch
-        int ret = llama_process(ctx_dft, LLAMA_PROCESS_TYPE_DECODE, batch.get());
+        const int ret = decode_draft(batch);
         if (ret != 0) {
             LOG_WRN("%s: llama_process returned %d\n", __func__, ret);
             return;
@@ -2854,6 +2867,18 @@ int32_t common_speculative_n_max(const common_speculative * spec) {
     }
 
     return n_max;
+}
+
+bool common_speculative_set_resident_draft(common_speculative * spec, std::function<bool()> evict_prefix) {
+    if (!spec || spec->impls.size() != 1 || spec->impls.front()->type != COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) {
+        return false;
+    }
+    auto & draft = static_cast<common_speculative_impl_draft_dflash &>(*spec->impls.front());
+    if (draft.n_max != 3 || !draft.sample_from_anchor || draft.is_dflash2 || draft.is_lilicorr) {
+        return false;
+    }
+    draft.evict_resident_prefix = std::move(evict_prefix);
+    return true;
 }
 
 std::vector<double> common_speculative_synth_rates_resolve(const common_params_speculative * spec, int32_t n_max) {

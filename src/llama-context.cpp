@@ -491,8 +491,9 @@ llama_context::llama_context(
         const auto type_v_swa = params.type_v_swa == GGML_TYPE_COUNT ? params.type_v : params.type_v_swa;
         const bool token32_swa_supported = (type_k_swa == params.type_k && type_v_swa == params.type_v) ||
             (type_k_swa == GGML_TYPE_F16 && type_v_swa == GGML_TYPE_F16);
+        const bool resident_prefixes = cparams.kv_unified && std::getenv("LLAMA_SERVER_RESIDENT_PREFIXES");
         params.kv_v_token32 = params.kv_v_token32 && model.arch == LLM_ARCH_SPARK2_5 &&
-            hparams.swa_type != LLAMA_SWA_TYPE_NONE && cparams.n_seq_max == 1 &&
+            hparams.swa_type != LLAMA_SWA_TYPE_NONE && (cparams.n_seq_max == 1 || resident_prefixes) &&
             cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT && !cparams.ctx_other &&
             cparams.causal_attn && cparams.offload_kqv && cparams.flash_attn &&
             params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_ENABLED &&
@@ -783,7 +784,8 @@ void llama_context::sched_reserve() {
 
     const int64_t t_start_us = ggml_time_us();
 
-    const uint32_t n_seqs = cparams.n_seq_max;
+    // Device DSpark only drafts for the active sequence. Extra IDs may hold resident KV.
+    const uint32_t n_seqs = cparams.dspark_device_sampling ? 1 : cparams.n_seq_max;
     const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
 
     const size_t max_nodes = this->graph_max_nodes(n_tokens);
@@ -1051,7 +1053,7 @@ bool llama_context::memory_update(bool optimize) {
             throw std::runtime_error("failed to initialize memory context");
         }
 
-        const uint32_t n_seqs = cparams.n_seq_max;
+        const uint32_t n_seqs = cparams.dspark_device_sampling ? 1 : cparams.n_seq_max;
         const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
 
         const uint32_t n_outputs_max = std::min(n_tokens, cparams.n_outputs_max);
@@ -1411,8 +1413,12 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
 
 
 bool llama_context::init_dspark_device(llama_context & target) {
+    // The HTTP server reserves extra KV sequence IDs for cached prefixes of its one active slot.
+    const bool resident_prefixes = cparams.kv_unified && target.cparams.kv_unified &&
+        std::getenv("LLAMA_SERVER_RESIDENT_PREFIXES");
     if (model.arch != LLM_ARCH_DFLASH || model.hparams.dsv4_hc_mult > 0 ||
-        cparams.n_seq_max != 1 || target.cparams.n_seq_max != 1 || !model.dspark_markov_w1 || !model.dspark_markov_w2 || model.d2t) {
+        (!resident_prefixes && (cparams.n_seq_max != 1 || target.cparams.n_seq_max != 1)) ||
+        !model.dspark_markov_w1 || !model.dspark_markov_w2 || model.d2t) {
         throw std::runtime_error("device DSpark requires a full-vocabulary, single-sequence draft");
     }
     const auto anchor = model.gguf_kv.find("dflash.sample_from_anchor");

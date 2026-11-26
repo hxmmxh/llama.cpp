@@ -1,5 +1,6 @@
 #include "ggml-trace.h"
 #include "sampling.h"
+#include "../src/llama-ext.h"
 
 #include "common.h"
 #include "fit.h"
@@ -615,7 +616,7 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl) {
 
 static llama_token common_sampler_sample_impl(
         common_sampler * gsmpl, llama_context * ctx, int idx,
-        const float * logits, int32_t n_vocab, bool grammar_first) {
+        const float * logits, int32_t n_vocab, bool grammar_first, bool token_only = false) {
     if (ctx) {
         llama_synchronize(ctx);
     }
@@ -678,7 +679,11 @@ static llama_token common_sampler_sample_impl(
         llama_sampler_apply(grmr, &cur_p);
     }
 
-    llama_sampler_apply(chain, &cur_p);
+    if (token_only) {
+        llama_sampler_apply_token_only(chain, &cur_p);
+    } else {
+        llama_sampler_apply(chain, &cur_p);
+    }
 
     id = cur_p.data[cur_p.selected].id;
 
@@ -709,7 +714,11 @@ static llama_token common_sampler_sample_impl(
         llama_sampler_apply(grmr,  &cur_p);
     }
 
-    llama_sampler_apply(chain, &cur_p);
+    if (token_only) {
+        llama_sampler_apply_token_only(chain, &cur_p);
+    } else {
+        llama_sampler_apply(chain, &cur_p);
+    }
 
     GGML_ASSERT(cur_p.selected != -1 && "no selected token during sampling - check your sampling configuration");
 
@@ -720,6 +729,10 @@ static llama_token common_sampler_sample_impl(
 
 llama_token common_sampler_sample(common_sampler * gsmpl, llama_context * ctx, int idx, bool grammar_first) {
     return common_sampler_sample_impl(gsmpl, ctx, idx, nullptr, 0, grammar_first);
+}
+
+llama_token common_sampler_sample_token_only(struct common_sampler * gsmpl, struct llama_context * ctx, int idx) {
+    return common_sampler_sample_impl(gsmpl, ctx, idx, nullptr, 0, false, true);
 }
 
 llama_token common_sampler_sample_logits(common_sampler * gsmpl, const float * logits, int32_t n_vocab, bool grammar_first) {

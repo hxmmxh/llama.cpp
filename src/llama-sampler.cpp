@@ -1,5 +1,6 @@
 #include "llama-sampler.h"
 
+#include "llama-ext.h"
 #include "llama-impl.h"
 #include "llama-vocab.h"
 #include "llama-grammar.h"
@@ -690,14 +691,19 @@ static void llama_sampler_chain_accept(struct llama_sampler * smpl, llama_token 
     chain->n_sample++;
 }
 
-static void llama_sampler_chain_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+static void llama_sampler_top_p_apply(struct llama_sampler *, llama_token_data_array *);
+static void llama_sampler_dist_apply(struct llama_sampler *, llama_token_data_array *);
+static bool fast_top_p_draw(struct llama_sampler *, struct llama_sampler *, llama_token_data_array *);
+
+static void llama_sampler_chain_apply_impl(struct llama_sampler * smpl, llama_token_data_array * cur_p, bool token_only) {
     auto * chain = (llama_sampler_chain *) smpl->ctx;
 
     time_meas tm(chain->t_sample_us, chain->params.no_perf);
 
     bool is_backend = chain->is_init;
 
-    for (auto & smpl : chain->samplers) {
+    for (size_t i = 0; i < chain->samplers.size(); ++i) {
+        auto & smpl = chain->samplers[i];
         if (is_backend && smpl.is_backend) {
             continue;
         }
@@ -708,7 +714,30 @@ static void llama_sampler_chain_apply(struct llama_sampler * smpl, llama_token_d
             continue;
         }
 
+        if (token_only && !chain->is_init && smpl.ptr->iface->apply == llama_sampler_top_p_apply) {
+            size_t j = i+1;
+            while (j < chain->samplers.size() && chain->samplers[j].ptr->iface == &llama_sampler_empty_i) {
+                ++j;
+            }
+            if (j+1 == chain->samplers.size() &&
+                    chain->samplers[j].ptr->iface->apply == llama_sampler_dist_apply &&
+                    fast_top_p_draw(smpl.ptr, chain->samplers[j].ptr, cur_p)) {
+                return;
+            }
+        }
         llama_sampler_apply(smpl.ptr, cur_p);
+    }
+}
+
+static void llama_sampler_chain_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    llama_sampler_chain_apply_impl(smpl, cur_p, false);
+}
+
+LLAMA_API void llama_sampler_apply_token_only(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    if (smpl && smpl->iface->apply == llama_sampler_chain_apply) {
+        llama_sampler_chain_apply_impl(smpl, cur_p, true);
+    } else {
+        llama_sampler_apply(smpl, cur_p);
     }
 }
 
@@ -1607,6 +1636,127 @@ static void llama_sampler_top_p_apply(struct llama_sampler * smpl, llama_token_d
     }
 
     cur_p->size = last_idx;
+}
+
+// Stable ordering of IEEE float logits, with both signed zeros in one key.
+static uint32_t descending_key(float logit) {
+    uint32_t bits;
+    std::memcpy(&bits, &logit, sizeof(bits));
+    if (logit == 0.0f) {
+        bits = 0;
+    }
+    return ~(bits ^ ((bits >> 31) ? UINT32_MAX : 0x80000000u));
+}
+
+struct fast_draw_workspace {
+    std::vector<uint64_t> keys, scratch;
+    std::vector<llama_token_data> nucleus;
+};
+
+static bool fast_nucleus(llama_token_data_array * input, float threshold, size_t min_keep,
+                         fast_draw_workspace & work) {
+    if (input->sorted || input->size < 2048 || input->size > UINT32_MAX || !(threshold < 1.f)) {
+        return false;
+    }
+    auto & keys = work.keys;
+    auto & scratch = work.scratch;
+    const uint32_t n = (uint32_t) input->size;
+    keys.resize(n);
+    scratch.resize(n);
+    std::array<std::array<uint32_t, 256>, 4> hist{};
+    for (uint32_t i = 0; i < n; ++i) {
+        const float logit = input->data[i].logit;
+        if (std::isnan(logit) || logit == INFINITY) {
+            return false;
+        }
+        const uint32_t key = descending_key(logit);
+        keys[i] = (uint64_t(key) << 32) | i;
+        for (unsigned pass = 0; pass < 4; ++pass) {
+            ++hist[pass][(key >> (8 * pass)) & 255];
+        }
+    }
+
+    auto * from = keys.data();
+    auto * to = scratch.data();
+    for (unsigned pass = 0; pass < 4; ++pass) {
+        auto & offset = hist[pass];
+        uint32_t end = 0;
+        bool all_equal = false;
+        for (auto & count : offset) {
+            if (count == n) {
+                all_equal = true;
+                break;
+            }
+            const auto begin = end;
+            end += count;
+            count = begin;
+        }
+        if (all_equal) {
+            continue;
+        }
+        const unsigned shift = 32 + 8 * pass;
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint64_t key = from[i];
+            to[offset[(key >> shift) & 255]++] = key;
+        }
+        std::swap(from, to);
+    }
+
+    if (!std::isfinite(input->data[(uint32_t) from[0]].logit)) {
+        return false;
+    }
+    // Keep the same scalar softmax and float prefix sum as the original.
+    llama_sampler_softmax_impl(input, false);
+    float mass = 0;
+    uint32_t kept = n;
+    for (uint32_t i = 0; i < n; ++i) {
+        mass += input->data[(uint32_t) from[i]].p;
+        if (mass >= threshold && i+1 >= min_keep) {
+            kept = i+1;
+            break;
+        }
+    }
+
+    // A tied cutoff can change which token IDs are retained.
+    if (kept < n && (from[kept-1] >> 32) == (from[kept] >> 32)) {
+        return false;
+    }
+    auto & nucleus = work.nucleus;
+    nucleus.resize(kept);
+    for (uint32_t i = 0; i < kept; ++i) {
+        nucleus[i] = input->data[(uint32_t) from[i]];
+    }
+    return true;
+}
+
+static bool tied_draw(const llama_token_data_array & values) {
+    const size_t i = values.selected;
+    const auto * data = values.data;
+    return (i > 0 && data[i-1].logit == data[i].logit) ||
+           (i+1 < values.size && data[i+1].logit == data[i].logit);
+}
+
+// Only use when the caller does not consume the order of tied candidates.
+static bool fast_top_p_draw(struct llama_sampler * top_p, struct llama_sampler * dist, llama_token_data_array * cur) {
+    const auto * top = (const llama_sampler_top_p *) top_p->ctx;
+    static thread_local fast_draw_workspace work;
+    if (!fast_nucleus(cur, top->p, top->min_keep, work)) {
+        return false;
+    }
+    llama_token_data_array ranked = {work.nucleus.data(), work.nucleus.size(), -1, true};
+    auto * state = (llama_sampler_dist *) dist->ctx;
+    const auto rng = state->rng;
+    llama_sampler_dist_apply(dist, &ranked);
+    // Replaying the original chain restores the legacy index inside a tie.
+    if (tied_draw(ranked)) {
+        state->rng = rng;
+        return false;
+    }
+    std::copy(work.nucleus.begin(), work.nucleus.end(), cur->data);
+    cur->size = ranked.size;
+    cur->sorted = true;
+    cur->selected = ranked.selected;
+    return true;
 }
 
 static struct llama_sampler * llama_sampler_top_p_clone(const struct llama_sampler * smpl) {

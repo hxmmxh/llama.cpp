@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 
 //
 // llama_kv_cache_iswa
@@ -105,14 +106,32 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
             v_trans, offload, unified, size_base, n_seq_max,
             0, LLAMA_SWA_TYPE_NONE, mem_other_base, filter_base, reuse, share, "", kv_tail_tokens, n_ubatch, kv_v_token32);
 
-    LLAMA_LOG_INFO("%s: creating     SWA KV cache, size = %u cells\n", __func__, size_swa);
-
     // Every visible SWA row is within the precision tail. Keep a single F16 window.
     const bool swa_f16 = kv_v_token32 && !swa_full && hparams.swa_type == LLAMA_SWA_TYPE_STANDARD &&
         kv_tail_tokens >= hparams.n_swa && type_k_swa == GGML_TYPE_COUNT && type_v_swa == GGML_TYPE_COUNT;
     const auto swa_k = swa_f16 ? GGML_TYPE_F16 : (type_k_swa == GGML_TYPE_COUNT ? type_k : type_k_swa);
     const auto swa_v = swa_f16 ? GGML_TYPE_F16 : (type_v_swa == GGML_TYPE_COUNT ? type_v : type_v_swa);
     const bool swa_is_f16 = swa_k == GGML_TYPE_F16 && swa_v == GGML_TYPE_F16;
+
+    uint32_t resident_swa_entries = 0;
+    const bool resident_model = model.arch == LLM_ARCH_SPARK2_5 || (model.arch == LLM_ARCH_DFLASH && hparams.dsv4_hc_mult == 0);
+    if (resident_model && unified && !swa_full && !mem_other && !v_trans && offload && swa_is_f16 &&
+            hparams.swa_type == LLAMA_SWA_TYPE_STANDARD && hparams.n_swa > 0) {
+        if (const char * env = std::getenv("LLAMA_SERVER_RESIDENT_PREFIXES")) {
+            char * end = nullptr;
+            const long entries = std::strtol(env, &end, 10);
+            if (end != env && *end == '\0' && entries > 0 && n_seq_max % 2 == 1 && entries == (n_seq_max - 1) / 2) {
+                resident_swa_entries = static_cast<uint32_t>(entries);
+                const uint32_t window_capacity = hparams.n_swa + std::max(hparams.n_swa, n_ubatch);
+                size_swa = GGML_PAD(std::min(size_base, window_capacity), 256);
+            }
+        }
+    }
+
+    LLAMA_LOG_INFO("%s: creating     SWA KV cache, size = %u cells\n", __func__, size_swa);
+    if (resident_swa_entries > 0) {
+        LLAMA_LOG_INFO("%s: SWA residency: active stream and %u snapshot streams\n", __func__, resident_swa_entries);
+    }
     if (swa_f16) {
         LLAMA_LOG_INFO("%s: token32 tail covers the %u-token SWA window; using one F16 cache\n", __func__, hparams.n_swa);
     }
@@ -120,7 +139,7 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
             model, no_alloc, hparams, swa_k, swa_v,
             v_trans, offload, unified, size_swa, n_seq_max,
             hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share, "",
-            swa_is_f16 ? 0 : kv_tail_tokens, n_ubatch, kv_v_token32 && !swa_is_f16);
+            swa_is_f16 ? 0 : kv_tail_tokens, n_ubatch, kv_v_token32 && !swa_is_f16, resident_swa_entries);
 }
 
 void llama_kv_cache_iswa::clear(bool data) {

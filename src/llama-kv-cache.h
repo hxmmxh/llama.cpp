@@ -118,7 +118,8 @@ public:
                  const char *   name_tag = "",
                      uint32_t   kv_tail_tokens = 0,
                      uint32_t   n_ubatch = 0,
-                         bool   kv_v_token32 = false);
+                         bool   kv_v_token32 = false,
+                     uint32_t   resident_swa_entries = 0);
 
     ~llama_kv_cache() = default;
 
@@ -162,6 +163,7 @@ public:
     uint32_t get_size()     const;
     uint32_t get_n_seq_max() const;
     uint32_t get_n_stream() const;
+    bool has_resident_swa_streams() const { return resident_swa_entries > 0; }
 
     bool get_has_shift() const;
 
@@ -314,6 +316,7 @@ private:
     bool v_trans = true;  // the value tensor is transposed
 
     const uint32_t n_seq_max = 1;
+    const uint32_t resident_swa_entries = 0;
     const uint32_t n_stream  = 1;
 
     // SWA
@@ -355,7 +358,9 @@ private:
     std::vector<uint32_t> seq_to_stream;
 
     // pending stream copies that will be applied during the next update
-    stream_copy_info sc_info;
+    mutable stream_copy_info sc_info;
+
+    void copy_streams(const stream_copy_info & copies) const;
 
     std::vector<kv_layer> layers;
 
